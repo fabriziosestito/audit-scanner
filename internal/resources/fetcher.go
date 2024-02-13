@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 
+	"github.com/gookit/goutil/dump"
 	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -16,10 +17,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/pager"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-const policyServerResource = "policyservers"
+const (
+	pageSize             = 100
+	policyServerResource = "policyservers"
+)
 
 // Fetcher fetches all auditable resources.
 // Uses a dynamic client to get all resources from the rules defined in a policy
@@ -37,16 +42,6 @@ type Fetcher struct {
 	clientset kubernetes.Interface
 }
 
-// AuditableResources represents all resources that must be audited for a group of policies.
-// Example:
-// AuditableResources{Policies:[policy1, policy2] Resources:[podA, podB], Policies:[policy1] Resources:[deploymentA]}
-// means that podA and pobB must be evaluated by policy1 and policy2. deploymentA must be evaluated by policy1
-type AuditableResources struct {
-	Policies []policiesv1.Policy
-	// It can be any kubernetes resource
-	Resources []unstructured.Unstructured
-}
-
 // NewFetcher returns a new fetcher with a dynamic client
 func NewFetcher(kubewardenNamespace string, policyServerURL string) (*Fetcher, error) {
 	config := ctrl.GetConfigOrDie()
@@ -58,68 +53,76 @@ func NewFetcher(kubewardenNamespace string, policyServerURL string) (*Fetcher, e
 	return &Fetcher{dynamicClient, kubewardenNamespace, policyServerURL, clientset}, nil
 }
 
-// GetResourcesForPolicies fetches all namespaced resources that must be audited
-// in a specific namespace and returns them in an AuditableResources array.
-// Iterates through all the rules in the policies to find all relevant resources. It creates a GVR (Group Version Resource)
-// array for each rule defined in a policy. Then fetches and aggregates the GVRs for all the policies.
-// Returns an array of AuditableResources. Each entry of the array will contain and array of resources of the same kind, and an array of
-// policies that should evaluate these resources. Example:
-// AuditableResources{Policies:[policy1, policy2] Resources:[podA, podB], Policies:[policy1] Resources:[deploymentA], Policies:[policy3] Resources:[ingressA]}
-func (f *Fetcher) GetResourcesForPolicies(ctx context.Context, policies []policiesv1.Policy, namespace string) ([]AuditableResources, error) {
-	auditableResources := []AuditableResources{}
-	gvrMap := createGVRPolicyMap(policies)
-	for resourceFilter, policies := range gvrMap {
-		isNamespaced, err := f.isNamespacedResource(resourceFilter.groupVersionResource)
-		if err != nil {
-			if apimachineryerrors.IsNotFound(err) {
-				log.Warn().
-					Str("resource GVK", resourceFilter.groupVersionResource.String()).
-					Msg("API resource not found")
-				continue
-			}
-			return nil, err
-		}
-		if !isNamespaced {
-			// continue if resource is clusterwide
-			continue
-		}
+func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector *metav1.LabelSelector) (*pager.ListPager, error) {
+	page := 0
 
-		resources, err := f.getResourcesDynamically(ctx, &resourceFilter, namespace)
+	listPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+		var resources *unstructured.UnstructuredList
+		page++
+
+		resources, err := f.listResources(ctx, gvr, nsName, labelSelector, opts)
 		if apimachineryerrors.IsNotFound(err) {
-			// continue if resource doesn't exist
 			log.Warn().
 				Dict("dict", zerolog.Dict().
-					Str("resource GVK", resourceFilter.groupVersionResource.String()).
-					Str("ns", namespace),
+					Str("resource GVK", gvr.String()).
+					Str("ns", nsName),
 				).Msg("API resource not found")
-			continue
 		}
 		if apimachineryerrors.IsForbidden(err) {
-			// continue if ServiceAccount lacks permissions, GVK may not exist, or
-			// policies may be misconfigured
+			// ServiceAccount lacks permissions, GVK may not exist, or policies may be misconfigured
 			log.Warn().
 				Dict("dict", zerolog.Dict().
-					Str("resource GVK", resourceFilter.groupVersionResource.String()).
-					Str("ns", namespace),
+					Str("resource GVK", gvr.String()).
+					Str("ns", nsName),
 				).Msg("API resource forbidden, unknown GVK or ServiceAccount lacks permissions")
-			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if len(resources.Items) > 0 {
-			auditableResources = append(auditableResources, AuditableResources{
-				Policies:  policies,
-				Resources: resources.Items,
-			})
-		}
+
+		dump.P(page, gvr.String(), len(resources.Items))
+
+		return resources, nil
+	})
+
+	listPager.PageSize = pageSize
+
+	return listPager, nil
+}
+
+func (f *Fetcher) listResources(ctx context.Context,
+	gvr schema.GroupVersionResource,
+	nsName string,
+	labelSelector *metav1.LabelSelector,
+	opts metav1.ListOptions,
+) (
+	*unstructured.UnstructuredList, error,
+) {
+	resourceID := schema.GroupVersionResource{
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 	}
 
-	return auditableResources, nil
+	var list *unstructured.UnstructuredList
+	var err error
+
+	if labelSelector != nil {
+		labelSelector := metav1.FormatLabelSelector(labelSelector)
+		opts = metav1.ListOptions{LabelSelector: labelSelector}
+	}
+
+	list, err = f.dynamicClient.Resource(resourceID).Namespace(nsName).List(ctx, opts)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return list, nil
 }
 
 // Method to check if the given resource is namespaced or not.
-func (f *Fetcher) isNamespacedResource(gvr schema.GroupVersionResource) (bool, error) {
+func (f *Fetcher) IsNamespacedResource(gvr schema.GroupVersionResource) (bool, error) {
 	discoveryClient := f.clientset.Discovery()
 
 	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(gvr.GroupVersion().String())
@@ -134,152 +137,33 @@ func (f *Fetcher) isNamespacedResource(gvr schema.GroupVersionResource) (bool, e
 	return false, apimachineryerrors.NewNotFound(gvr.GroupResource(), gvr.Resource)
 }
 
-// GetClusterWideResourcesForPolicies fetches all cluster wide resources that must be
-// audited and returns them in an AuditableResources array. Iterates through all
-// the rules in the ClusterAdmissionPolicy policies to find all relevant resources.
-// It creates a GVR (Group Version Resource) array for each rule defined in a policy.
-// Then fetches and aggregates the GVRs for all the policies. Returns an array of
-// AuditableResources. Each entry of the array will contain and array of resources
-// of the same kind, and an array of policies that should evaluate these resources.
-// Example: AuditableResources{Policies:[policy1, policy2] Resources:[podA, podB], Policies:[policy1] Resources:[deploymentA], Policies:[policy3] Resources:[ingressA]}
-func (f *Fetcher) GetClusterWideResourcesForPolicies(ctx context.Context, policies []policiesv1.Policy) ([]AuditableResources, error) {
-	auditableResources := []AuditableResources{}
-	gvrMap := createGVRPolicyMap(policies)
-	for resourceFilter, policies := range gvrMap {
-		isNamespaced, err := f.isNamespacedResource(resourceFilter.groupVersionResource)
-		if err != nil {
-			if apimachineryerrors.IsNotFound(err) {
-				log.Warn().
-					Str("resource GVK", resourceFilter.groupVersionResource.String()).
-					Msg("API resource not found")
-				continue
-			}
-			return nil, err
-		}
-		if isNamespaced {
-			continue
-		}
-		resources, err := f.getClusterWideResourcesDynamically(ctx, &resourceFilter)
-		if apimachineryerrors.IsNotFound(err) {
-			// continue if resource doesn't exist
-			log.Warn().
-				Dict("dict", zerolog.Dict().
-					Str("resource GVK", resourceFilter.groupVersionResource.String()),
-				).Msg("API resource not found")
-			continue
-		}
-		if apimachineryerrors.IsForbidden(err) {
-			// continue if ServiceAccount lacks permissions, GVK may not exist, or
-			// policies may be misconfigured
-			log.Warn().
-				Dict("dict", zerolog.Dict().
-					Str("resource GVK", resourceFilter.groupVersionResource.String()),
-				).Msg("API resource forbidden, unknown GVK or ServiceAccount lacks permissions")
-			continue
-		}
-
-		if err != nil {
-			return nil, err
-		}
-		if len(resources.Items) > 0 {
-			auditableResources = append(auditableResources, AuditableResources{
-				Policies:  policies,
-				Resources: resources.Items,
-			})
-		}
-	}
-
-	return auditableResources, nil
-}
-
-func (f *Fetcher) getResourcesDynamically(ctx context.Context,
-	resourceFilter *resourceFilter,
-	namespace string) (
-	*unstructured.UnstructuredList, error,
-) {
-	resourceID := schema.GroupVersionResource{
-		Group:    resourceFilter.groupVersionResource.Group,
-		Version:  resourceFilter.groupVersionResource.Version,
-		Resource: resourceFilter.groupVersionResource.Resource,
-	}
-	var list *unstructured.UnstructuredList
-	var err error
-	listOptions := metav1.ListOptions{}
-	if resourceFilter.objectSelector != nil {
-		labelSelector := metav1.FormatLabelSelector(resourceFilter.objectSelector)
-		listOptions = metav1.ListOptions{LabelSelector: labelSelector}
-	}
-	list, err = f.dynamicClient.Resource(resourceID).Namespace(namespace).List(ctx, listOptions)
-
+func (f *Fetcher) GetPolicyServerURLRunningPolicy(ctx context.Context, policy policiesv1.Policy) (*url.URL, error) {
+	policyServer, err := getPolicyServerByName(ctx, policy.GetPolicyServer(), &f.dynamicClient)
 	if err != nil {
 		return nil, err
 	}
-
-	return list, nil
-}
-
-func (f *Fetcher) getClusterWideResourcesDynamically(ctx context.Context, resourceFilter *resourceFilter) (
-	*unstructured.UnstructuredList, error,
-) {
-	resourceID := schema.GroupVersionResource{
-		Group:    resourceFilter.groupVersionResource.Group,
-		Version:  resourceFilter.groupVersionResource.Version,
-		Resource: resourceFilter.groupVersionResource.Resource,
-	}
-	var list *unstructured.UnstructuredList
-	var err error
-	listOptions := metav1.ListOptions{}
-	if resourceFilter.objectSelector != nil {
-		labelSelector := metav1.FormatLabelSelector(resourceFilter.objectSelector)
-		listOptions = metav1.ListOptions{LabelSelector: labelSelector}
-	}
-	list, err = f.dynamicClient.Resource(resourceID).List(ctx, listOptions)
-
+	service, err := getServiceByAppLabel(ctx, policyServer.AppLabel(), f.kubewardenNamespace, &f.dynamicClient)
 	if err != nil {
 		return nil, err
 	}
-
-	return list, nil
-}
-
-// The resourceFilter type is struct used to store the two piece of data needed
-// to properly fetch the resources. The GroupVersionResource and LabelSelector.
-// This type is used only inside the resources package.
-type resourceFilter struct {
-	groupVersionResource schema.GroupVersionResource
-	objectSelector       *metav1.LabelSelector
-}
-
-func createGVRPolicyMap(policies []policiesv1.Policy) map[resourceFilter][]policiesv1.Policy {
-	resources := make(map[resourceFilter][]policiesv1.Policy)
-	for _, policy := range policies {
-		addPolicyResources(resources, policy)
+	if len(service.Spec.Ports) < 1 {
+		return nil, fmt.Errorf("policy server service does not have a port")
 	}
-
-	return resources
-}
-
-// All resources that matches the rules must be evaluated. Since rules provides an array of groups, another of version
-// and another of resources we need to create all possible GVR from these arrays.
-func addPolicyResources(resources map[resourceFilter][]policiesv1.Policy, policy policiesv1.Policy) {
-	for _, rules := range policy.GetRules() {
-		for _, resource := range rules.Resources {
-			for _, version := range rules.APIVersions {
-				for _, group := range rules.APIGroups {
-					gvr := schema.GroupVersionResource{
-						Group:    group,
-						Version:  version,
-						Resource: resource,
-					}
-					resourceFilter := resourceFilter{
-						groupVersionResource: gvr,
-						objectSelector:       policy.GetObjectSelector(),
-					}
-					resources[resourceFilter] = append(resources[resourceFilter], policy)
-				}
-			}
+	var urlStr string
+	if f.policyServerURL != "" {
+		url, err := url.Parse(f.policyServerURL)
+		if err != nil {
+			log.Fatal().Msg("incorrect URL for policy-server")
 		}
+		urlStr = fmt.Sprintf("%s/audit/%s", url, policy.GetUniqueName())
+	} else {
+		urlStr = fmt.Sprintf("https://%s.%s.svc:%d/audit/%s", service.Name, f.kubewardenNamespace, service.Spec.Ports[0].Port, policy.GetUniqueName())
 	}
+	url, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	return url, nil
 }
 
 func getPolicyServerByName(ctx context.Context, policyServerName string, dynamicClient *dynamic.Interface) (*policiesv1.PolicyServer, error) {
@@ -320,33 +204,4 @@ func getServiceByAppLabel(ctx context.Context, appLabel string, namespace string
 		return nil, err
 	}
 	return &service, nil
-}
-
-func (f *Fetcher) GetPolicyServerURLRunningPolicy(ctx context.Context, policy policiesv1.Policy) (*url.URL, error) {
-	policyServer, err := getPolicyServerByName(ctx, policy.GetPolicyServer(), &f.dynamicClient)
-	if err != nil {
-		return nil, err
-	}
-	service, err := getServiceByAppLabel(ctx, policyServer.AppLabel(), f.kubewardenNamespace, &f.dynamicClient)
-	if err != nil {
-		return nil, err
-	}
-	if len(service.Spec.Ports) < 1 {
-		return nil, fmt.Errorf("policy server service does not have a port")
-	}
-	var urlStr string
-	if f.policyServerURL != "" {
-		url, err := url.Parse(f.policyServerURL)
-		if err != nil {
-			log.Fatal().Msg("incorrect URL for policy-server")
-		}
-		urlStr = fmt.Sprintf("%s/audit/%s", url, policy.GetUniqueName())
-	} else {
-		urlStr = fmt.Sprintf("https://%s.%s.svc:%d/audit/%s", service.Name, f.kubewardenNamespace, service.Spec.Ports[0].Port, policy.GetUniqueName())
-	}
-	url, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, err
-	}
-	return url, nil
 }

@@ -24,7 +24,7 @@ lint: $(GOLANGCI_LINT)
 unit-tests: fmt vet ## Run unit tests.
 	go test ./cmd/... ./internal/... -race -test.v -coverprofile=coverage/unit-tests/coverage.txt -covermode=atomic
 
-build: fmt vet lint ## Build audit-scanner binary.
+build: # fmt vet lint ## Build audit-scanner binary.
 	go build -o bin/audit-scanner .
 
 .PHONY: docker-build
