@@ -109,7 +109,7 @@ func (f *Fetcher) listResources(ctx context.Context,
 
 	if labelSelector != nil {
 		labelSelector := metav1.FormatLabelSelector(labelSelector)
-		opts = metav1.ListOptions{LabelSelector: labelSelector}
+		opts.LabelSelector = labelSelector
 	}
 
 	list, err = f.dynamicClient.Resource(resourceID).Namespace(nsName).List(ctx, opts)

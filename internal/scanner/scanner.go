@@ -211,7 +211,6 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 			if err != nil {
 				return err
 			}
-
 		}
 	}
 
