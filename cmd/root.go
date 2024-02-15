@@ -72,11 +72,11 @@ There will be a ClusterPolicyReport with results for cluster-wide resources.`,
 			return err
 		}
 
-		policiesFetcher, err := policies.NewFetcher(kubewardenNamespace, skippedNs)
+		policiesFetcher, err := policies.NewFetcher(kubewardenNamespace, skippedNs, policyServerURL)
 		if err != nil {
 			return err
 		}
-		resourcesFetcher, err := resources.NewFetcher(kubewardenNamespace, policyServerURL)
+		resourcesFetcher, err := resources.NewFetcher(kubewardenNamespace)
 		if err != nil {
 			return err
 		}

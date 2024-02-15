@@ -15,11 +15,11 @@ import (
 
 	"github.com/gookit/goutil/dump"
 	reportLogger "github.com/kubewarden/audit-scanner/internal/log"
+	"github.com/kubewarden/audit-scanner/internal/policies"
 
 	"github.com/kubewarden/audit-scanner/internal/constants"
 	"github.com/kubewarden/audit-scanner/internal/report"
 	"github.com/kubewarden/audit-scanner/internal/resources"
-	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -30,29 +30,23 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/pager"
-
-	apimachineryerrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // A PoliciesFetcher interacts with the kubernetes api to return Kubewarden policies
 type PoliciesFetcher interface {
 	// GetPoliciesForANamespace gets all auditable policies for a given
 	// namespace, and the number of skipped policies
-	GetPoliciesForANamespace(namespace string) ([]policiesv1.Policy, int, error)
+	GetPoliciesForANamespace(namespace string) (policies.FetchedPolicies, int, error)
 	// GetNamespace gets a given namespace
 	GetNamespace(namespace string) (*v1.Namespace, error)
 	// GetAuditedNamespaces gets all namespaces, minus those in the skipped ns list
 	GetAuditedNamespaces() (*v1.NamespaceList, error)
 	// Get all auditable ClusterAdmissionPolicies and the number of skipped policies
-	GetClusterAdmissionPolicies() ([]policiesv1.Policy, int, error)
+	GetClusterAdmissionPolicies() (policies.FetchedPolicies, int, error)
 }
 
 type ResourcesFetcher interface {
 	GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector *metav1.LabelSelector) (*pager.ListPager, error)
-	// GetPolicyServerURLRunningPolicy gets the URL used to send API requests to the policy server
-	GetPolicyServerURLRunningPolicy(ctx context.Context, policy policiesv1.Policy) (*url.URL, error)
-	// IsNamespacedResource returns true if the resource is namespaced
-	IsNamespacedResource(gvr schema.GroupVersionResource) (bool, error)
 }
 
 // A Scanner verifies that existing resources don't violate any of the policies
@@ -179,25 +173,9 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 			Msg("error when obtaining PolicyReport")
 	}
 
-	policiesByResource := s.PoliciesByResource(policies)
-	for gvr, objectFilters := range policiesByResource {
-		isNamespaced, err := s.resourcesFetcher.IsNamespacedResource(gvr)
-		if err != nil {
-			if apimachineryerrors.IsNotFound(err) {
-				log.Warn().
-					Str("resource GVK", gvr.String()).
-					Msg("API resource not found")
-				continue
-			}
-			return err
-		}
-		if !isNamespaced {
-			// continue if resource is clusterwide
-			continue
-		}
-
+	for gvr, objectFilters := range policies {
 		for filter, policies := range objectFilters {
-			pager, err := s.resourcesFetcher.GetResources(gvr, nsName, filter.labelSelector)
+			pager, err := s.resourcesFetcher.GetResources(gvr, nsName, filter.LabelSelector)
 			if err != nil {
 				return err
 			}
@@ -277,25 +255,9 @@ func (s *Scanner) ScanClusterWideResources() error {
 		log.Info().Err(err).Msg("no-prexisting ClusterPolicyReport, will create one at the end of the scan")
 	}
 
-	policiesByResource := s.PoliciesByResource(policies)
-	for gvr, objectFilters := range policiesByResource {
-		isNamespaced, err := s.resourcesFetcher.IsNamespacedResource(gvr)
-		if err != nil {
-			if apimachineryerrors.IsNotFound(err) {
-				log.Warn().
-					Str("resource GVK", gvr.String()).
-					Msg("API resource not found")
-				continue
-			}
-			return err
-		}
-		if isNamespaced {
-			// continue if resource is namespaced
-			continue
-		}
-
+	for gvr, objectFilters := range policies {
 		for filter, policies := range objectFilters {
-			pager, err := s.resourcesFetcher.GetResources(gvr, "", filter.labelSelector)
+			pager, err := s.resourcesFetcher.GetResources(gvr, "", filter.LabelSelector)
 			if err != nil {
 				return err
 			}
@@ -324,10 +286,10 @@ func (s *Scanner) ScanClusterWideResources() error {
 	return nil
 }
 
-func auditClusterResource(policies []PolicyWithPolicyServer, resource unstructured.Unstructured, httpClient *http.Client, clusterReport, previousClusterReport *report.ClusterPolicyReport) {
+func auditClusterResource(policies []policies.PolicyWithPolicyServer, resource unstructured.Unstructured, httpClient *http.Client, clusterReport, previousClusterReport *report.ClusterPolicyReport) {
 	for _, p := range policies {
-		url := p.policyServer
-		policy := p.policy
+		url := p.PolicyServer
+		policy := p.Policy
 
 		if result := previousClusterReport.GetReusablePolicyReportResult(policy, resource); result != nil {
 			// We have a result from the same policy version for the same resource instance.
@@ -366,10 +328,10 @@ func auditClusterResource(policies []PolicyWithPolicyServer, resource unstructur
 	}
 }
 
-func auditResource(policies []PolicyWithPolicyServer, resource unstructured.Unstructured, httpClient *http.Client, previousNsReport, nsReport *report.PolicyReport) {
+func auditResource(policies []policies.PolicyWithPolicyServer, resource unstructured.Unstructured, httpClient *http.Client, previousNsReport, nsReport *report.PolicyReport) {
 	for _, p := range policies {
-		url := p.policyServer
-		policy := p.policy
+		url := p.PolicyServer
+		policy := p.Policy
 
 		if result := previousNsReport.GetReusablePolicyReportResult(policy, resource); result != nil {
 			dump.P("here")
@@ -438,60 +400,4 @@ func sendAdmissionReviewToPolicyServer(url *url.URL, admissionRequest *admv1.Adm
 		return nil, fmt.Errorf("cannot deserialize the audit review response: %w", err)
 	}
 	return &admissionReview, nil
-}
-
-type ObjectFilter struct {
-	labelSelector *metav1.LabelSelector
-}
-
-type PolicyWithPolicyServer struct {
-	policy       policiesv1.Policy
-	policyServer *url.URL
-}
-
-func (s *Scanner) PoliciesByResource(policies []policiesv1.Policy) map[schema.GroupVersionResource]map[ObjectFilter][]PolicyWithPolicyServer {
-	resources := make(map[schema.GroupVersionResource]map[ObjectFilter][]PolicyWithPolicyServer)
-	for _, policy := range policies {
-		url, err := s.resourcesFetcher.GetPolicyServerURLRunningPolicy(context.Background(), policy)
-		if err != nil {
-			panic(err)
-		}
-
-		for _, rules := range policy.GetRules() {
-			for _, resource := range rules.Resources {
-				for _, version := range rules.APIVersions {
-					for _, group := range rules.APIGroups {
-						gvr := schema.GroupVersionResource{
-							Group:    group,
-							Version:  version,
-							Resource: resource,
-						}
-						filter := ObjectFilter{
-							labelSelector: policy.GetObjectSelector(),
-						}
-
-						p := PolicyWithPolicyServer{
-							policy:       policy,
-							policyServer: url,
-						}
-
-						if _, ok := resources[gvr]; !ok {
-							resources[gvr] = map[ObjectFilter][]PolicyWithPolicyServer{
-								filter: {p},
-							}
-							continue
-						}
-
-						if _, ok := resources[gvr][filter]; !ok {
-							resources[gvr][filter] = []PolicyWithPolicyServer{p}
-						} else {
-							resources[gvr][filter] = append(resources[gvr][filter], p)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return resources
 }
