@@ -36,13 +36,13 @@ import (
 type PoliciesFetcher interface {
 	// GetPoliciesForANamespace gets all auditable policies for a given
 	// namespace, and the number of skipped policies
-	GetPoliciesForANamespace(namespace string) (policies.FetchedPolicies, int, error)
+	GetPoliciesForANamespace(namespace string) (policies.FetchedPolicies, int, int, error)
 	// GetNamespace gets a given namespace
 	GetNamespace(namespace string) (*v1.Namespace, error)
 	// GetAuditedNamespaces gets all namespaces, minus those in the skipped ns list
 	GetAuditedNamespaces() (*v1.NamespaceList, error)
 	// Get all auditable ClusterAdmissionPolicies and the number of skipped policies
-	GetClusterAdmissionPolicies() (policies.FetchedPolicies, int, error)
+	GetClusterAdmissionPolicies() (policies.FetchedPolicies, int, int, error)
 }
 
 type ResourcesFetcher interface {
@@ -99,6 +99,7 @@ func NewScanner(
 
 	// initialize httpClient while conserving default settings
 	httpClient := *http.DefaultClient
+	// TODO: (fabrizio) set timeout
 	httpClient.Transport = http.DefaultTransport
 	transport, ok := httpClient.Transport.(*http.Transport)
 	if !ok {
@@ -147,7 +148,7 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 		return err
 	}
 
-	policies, skippedNum, err := s.policiesFetcher.GetPoliciesForANamespace(nsName)
+	policies, policiesNum, skippedNum, err := s.policiesFetcher.GetPoliciesForANamespace(nsName)
 	if err != nil {
 		return err
 	}
@@ -155,7 +156,7 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 	log.Info().
 		Str("namespace", nsName).
 		Dict("dict", zerolog.Dict().
-			Int("policies to evaluate", len(policies)).
+			Int("policies to evaluate", policiesNum).
 			Int("policies skipped", skippedNum),
 		).Msg("policy count")
 
@@ -234,14 +235,14 @@ func (s *Scanner) ScanAllNamespaces() error {
 func (s *Scanner) ScanClusterWideResources() error {
 	log.Info().Msg("clusterwide resources scan started")
 
-	policies, skippedNum, err := s.policiesFetcher.GetClusterAdmissionPolicies()
+	policies, policyNum, skippedNum, err := s.policiesFetcher.GetClusterAdmissionPolicies()
 	if err != nil {
 		return err
 	}
 
 	log.Info().
 		Dict("dict", zerolog.Dict().
-			Int("policies to evaluate", len(policies)).
+			Int("policies to evaluate", policyNum).
 			Int("policies skipped", skippedNum),
 		).Msg("cluster admission policies count")
 

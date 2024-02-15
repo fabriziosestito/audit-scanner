@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,8 +25,6 @@ const policyServerResource = "policyservers"
 type Fetcher struct {
 	// client knows about policies.kubewarden.io GVK
 	client client.Client
-
-	clientset kubernetes.Interface
 	// Namespace where the Kubewarden components (e.g. policy server) are installed
 	// This is the namespace used to fetch the policy server resources
 	kubewardenNamespace string
@@ -49,7 +46,6 @@ func NewFetcher(kubewardenNamespace string, skippedNs []string, policyServerURL 
 		return nil, err
 	}
 
-	clientset, err := kubernetes.NewForConfig(ctrl.GetConfigOrDie())
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +58,6 @@ func NewFetcher(kubewardenNamespace string, skippedNs []string, policyServerURL 
 
 	return &Fetcher{
 		client:              client,
-		clientset:           clientset,
 		kubewardenNamespace: kubewardenNamespace,
 		skippedNs:           skippedNs,
 		filter:              filterAuditablePolicies,
@@ -72,14 +67,14 @@ func NewFetcher(kubewardenNamespace string, skippedNs []string, policyServerURL 
 
 // GetPoliciesForANamespace gets all auditable policies for a given namespace, and the number
 // of skipped policies
-func (f *Fetcher) GetPoliciesForANamespace(namespace string) (FetchedPolicies, int, error) {
+func (f *Fetcher) GetPoliciesForANamespace(namespace string) (FetchedPolicies, int, int, error) {
 	namespacePolicies, err := f.findNamespacesForAllClusterAdmissionPolicies()
 	if err != nil {
-		return nil, 0, fmt.Errorf("can't fetch ClusterAdmissionPolicies: %w", err)
+		return nil, 0, 0, fmt.Errorf("can't fetch ClusterAdmissionPolicies: %w", err)
 	}
 	admissionPolicies, err := f.getAdmissionPolicies(namespace)
 	if err != nil {
-		return nil, 0, fmt.Errorf("can't fetch AdmissionPolicies: %w", err)
+		return nil, 0, 0, fmt.Errorf("can't fetch AdmissionPolicies: %w", err)
 	}
 	for _, policy := range admissionPolicies {
 		policy := policy
@@ -91,7 +86,7 @@ func (f *Fetcher) GetPoliciesForANamespace(namespace string) (FetchedPolicies, i
 
 	fetchedPolicies := f.groupPoliciesByGVRAndObjectSelector(filteredPolicies, true)
 
-	return fetchedPolicies, skippedNum, nil
+	return fetchedPolicies, len(filteredPolicies), skippedNum, nil
 }
 
 func (f *Fetcher) getClusterAdmissionPolicies() ([]policiesv1.ClusterAdmissionPolicy, error) {
@@ -105,10 +100,10 @@ func (f *Fetcher) getClusterAdmissionPolicies() ([]policiesv1.ClusterAdmissionPo
 
 // GetClusterAdmissionPolicies gets all auditable ClusterAdmissionPolicy policies,
 // and the number of skipped policies
-func (f *Fetcher) GetClusterAdmissionPolicies() (FetchedPolicies, int, error) {
+func (f *Fetcher) GetClusterAdmissionPolicies() (FetchedPolicies, int, int, error) {
 	clusterAdmissionPolicies, err := f.getClusterAdmissionPolicies()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	policies := []policiesv1.Policy{}
 	for _, policy := range clusterAdmissionPolicies {
@@ -119,7 +114,7 @@ func (f *Fetcher) GetClusterAdmissionPolicies() (FetchedPolicies, int, error) {
 	skippedNum := len(policies) - len(filteredPolicies)
 
 	fetchedPolicies := f.groupPoliciesByGVRAndObjectSelector(filteredPolicies, false)
-	return fetchedPolicies, skippedNum, nil
+	return fetchedPolicies, len(filteredPolicies), skippedNum, nil
 }
 
 func (f *Fetcher) GetNamespace(nsName string) (*v1.Namespace, error) {
@@ -372,15 +367,15 @@ func (f *Fetcher) getPolicyServerByName(ctx context.Context, policyServerName st
 }
 
 func (f *Fetcher) getServiceByAppLabel(ctx context.Context, appLabel string, namespace string) (*v1.Service, error) {
-	labelSelector := fmt.Sprintf("app=%s", appLabel)
-	services, err := f.clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	serviceList := v1.ServiceList{}
+	err := f.client.List(ctx, &serviceList, &client.MatchingLabels{"app": appLabel})
 	if err != nil {
 		return nil, err
 	}
 
-	if len(services.Items) != 1 {
+	if len(serviceList.Items) != 1 {
 		return nil, fmt.Errorf("could not find a single service for the given policy server app label")
 	}
 
-	return &services.Items[0], nil
+	return &serviceList.Items[0], nil
 }
