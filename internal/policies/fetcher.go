@@ -9,10 +9,8 @@ import (
 	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
 	"github.com/rs/zerolog/log"
 	v1 "k8s.io/api/core/v1"
-	errorsApi "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -21,6 +19,15 @@ import (
 
 const policyServerResource = "policyservers"
 
+// // PolicyFetcher interacts with the kubernetes api to return Kubewarden policies
+// type PolicyFetcher interface {
+// 	// GetPoliciesForANamespace gets all auditable policies for a given
+// 	// namespace, and the number of skipped policies
+// 	GetPoliciesForANamespace(namespace string) (*Policies, error)
+// 	// Get all auditable ClusterAdmissionPolicies and the number of skipped policies
+// 	GetClusterAdmissionPolicies() (*Policies, error)
+// }
+
 // Fetcher fetches Kubewarden policies from the Kubernetes cluster, and filters policies that are auditable.
 type Fetcher struct {
 	// client knows about policies.kubewarden.io GVK
@@ -28,30 +35,34 @@ type Fetcher struct {
 	// Namespace where the Kubewarden components (e.g. policy server) are installed
 	// This is the namespace used to fetch the policy server resources
 	kubewardenNamespace string
-	// list of skipped namespaces from audit, by name. It includes kubewardenNamespace
-	skippedNs []string
-	// filter cribes the passed policies and returns only those that should be audited
-	filter func(policies []policiesv1.Policy) []policiesv1.Policy
 	// FQDN of the policy server to query. If not empty, Fetcher will query on
 	// port 3000. Useful for out-of-cluster debugging
 	policyServerURL string
 }
 
+type Policies struct {
+	// PoliciesByGVRAndObjectSelector represents a map of policies by GVR and ObjectSelector
+	PoliciesByGVRAndObjectSelector map[schema.GroupVersionResource]map[ObjectSelector][]*Policy
+	// PolicyNum represents the number of policies
+	PolicyNum int
+	// SkippedNum represents the number of skipped policies
+	SkippedNum int
+}
+
+type ObjectSelector struct {
+	LabelSelector *metav1.LabelSelector
+}
+
+// Policy represents a policy and the URL of the policy server where it is running
+type Policy struct {
+	policiesv1.Policy
+	PolicyServer *url.URL
+}
+
 // NewFetcher returns a Fetcher. It will try to use in-cluster config, which will work just if audit-scanner is deployed
 // inside a Pod. If in-cluster fails, it will try to fetch the kube config from the home dir. It will return an error
 // if both attempts fail.
-func NewFetcher(kubewardenNamespace string, skippedNs []string, policyServerURL string) (*Fetcher, error) {
-	client, err := newClient()
-	if err != nil {
-		return nil, err
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	skippedNs = append(skippedNs, kubewardenNamespace)
-
+func NewFetcher(client client.Client, kubewardenNamespace string, policyServerURL string) (*Fetcher, error) {
 	if policyServerURL != "" {
 		log.Info().Msg(fmt.Sprintf("querying PolicyServers at %s for debugging purposes. Don't forget to start `kubectl port-forward` if needed", policyServerURL))
 	}
@@ -59,34 +70,36 @@ func NewFetcher(kubewardenNamespace string, skippedNs []string, policyServerURL 
 	return &Fetcher{
 		client:              client,
 		kubewardenNamespace: kubewardenNamespace,
-		skippedNs:           skippedNs,
-		filter:              filterAuditablePolicies,
 		policyServerURL:     policyServerURL,
 	}, nil
 }
 
 // GetPoliciesForANamespace gets all auditable policies for a given namespace, and the number
 // of skipped policies
-func (f *Fetcher) GetPoliciesForANamespace(namespace string) (FetchedPolicies, int, int, error) {
+func (f *Fetcher) GetPoliciesForANamespace(namespace string) (*Policies, error) {
 	namespacePolicies, err := f.findNamespacesForAllClusterAdmissionPolicies()
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("can't fetch ClusterAdmissionPolicies: %w", err)
+		return nil, fmt.Errorf("can't fetch ClusterAdmissionPolicies: %w", err)
 	}
 	admissionPolicies, err := f.getAdmissionPolicies(namespace)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("can't fetch AdmissionPolicies: %w", err)
+		return nil, fmt.Errorf("can't fetch AdmissionPolicies: %w", err)
 	}
 	for _, policy := range admissionPolicies {
 		policy := policy
 		namespacePolicies[namespace] = append(namespacePolicies[namespace], &policy)
 	}
 
-	filteredPolicies := f.filter(namespacePolicies[namespace])
+	filteredPolicies := filterAuditablePolicies(namespacePolicies[namespace])
 	skippedNum := len(namespacePolicies[namespace]) - len(filteredPolicies)
 
-	fetchedPolicies := f.groupPoliciesByGVRAndObjectSelector(filteredPolicies, true)
+	policies := &Policies{
+		PoliciesByGVRAndObjectSelector: f.groupPoliciesByGVRAndObjectSelector(filteredPolicies, true),
+		PolicyNum:                      len(filteredPolicies),
+		SkippedNum:                     skippedNum,
+	}
 
-	return fetchedPolicies, len(filteredPolicies), skippedNum, nil
+	return policies, nil
 }
 
 func (f *Fetcher) getClusterAdmissionPolicies() ([]policiesv1.ClusterAdmissionPolicy, error) {
@@ -100,55 +113,26 @@ func (f *Fetcher) getClusterAdmissionPolicies() ([]policiesv1.ClusterAdmissionPo
 
 // GetClusterAdmissionPolicies gets all auditable ClusterAdmissionPolicy policies,
 // and the number of skipped policies
-func (f *Fetcher) GetClusterAdmissionPolicies() (FetchedPolicies, int, int, error) {
+func (f *Fetcher) GetClusterAdmissionPolicies() (*Policies, error) {
 	clusterAdmissionPolicies, err := f.getClusterAdmissionPolicies()
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, err
 	}
 	policies := []policiesv1.Policy{}
 	for _, policy := range clusterAdmissionPolicies {
 		policy := policy
 		policies = append(policies, &policy)
 	}
-	filteredPolicies := f.filter(policies)
+	filteredPolicies := filterAuditablePolicies(policies)
 	skippedNum := len(policies) - len(filteredPolicies)
 
-	fetchedPolicies := f.groupPoliciesByGVRAndObjectSelector(filteredPolicies, false)
-	return fetchedPolicies, len(filteredPolicies), skippedNum, nil
-}
-
-func (f *Fetcher) GetNamespace(nsName string) (*v1.Namespace, error) {
-	namespace := &v1.Namespace{}
-	err := f.client.Get(context.Background(),
-		client.ObjectKey{
-			Name: nsName,
-		},
-		namespace)
-	if err != nil && errorsApi.IsNotFound(err) {
-		return nil, err
-	}
-	if err != nil {
-		return nil, fmt.Errorf("can't get namespace %s: %w", nsName, err)
-	}
-	return namespace, nil
-}
-
-// GetAuditedNamespaces gets all namespaces besides the ones in fetcher.skippedNs
-// This function cannot be tested with fake.client, as fake.client doesn't
-// support fields.OneTermNotEqualSelector()
-func (f *Fetcher) GetAuditedNamespaces() (*v1.NamespaceList, error) {
-	skipNsFields := fields.Everything()
-	for _, nsName := range f.skippedNs {
-		skipNsFields = fields.AndSelectors(skipNsFields, fields.OneTermNotEqualSelector("metadata.name", nsName))
-		log.Debug().Str("ns", nsName).Msg("skipping ns")
+	result := &Policies{
+		PoliciesByGVRAndObjectSelector: f.groupPoliciesByGVRAndObjectSelector(filteredPolicies, true),
+		PolicyNum:                      len(filteredPolicies),
+		SkippedNum:                     skippedNum,
 	}
 
-	namespaceList := &v1.NamespaceList{}
-	err := f.client.List(context.Background(), namespaceList, &client.ListOptions{FieldSelector: skipNsFields})
-	if err != nil {
-		return nil, fmt.Errorf("can't list namespaces: %w", err)
-	}
-	return namespaceList, nil
+	return result, nil
 }
 
 // initializes map with an entry for all namespaces with an empty policies array as value
@@ -239,19 +223,8 @@ func newClient() (client.Client, error) { //nolint:ireturn
 	return client.New(config, client.Options{Scheme: customScheme})
 }
 
-type ObjectFilter struct {
-	LabelSelector *metav1.LabelSelector
-}
-
-type PolicyWithPolicyServer struct {
-	Policy       policiesv1.Policy
-	PolicyServer *url.URL
-}
-
-type FetchedPolicies map[schema.GroupVersionResource]map[ObjectFilter][]PolicyWithPolicyServer
-
-func (f *Fetcher) groupPoliciesByGVRAndObjectSelector(policies []policiesv1.Policy, namespaced bool) FetchedPolicies {
-	resources := make(FetchedPolicies)
+func (f *Fetcher) groupPoliciesByGVRAndObjectSelector(policies []policiesv1.Policy, namespaced bool) map[schema.GroupVersionResource]map[ObjectSelector][]*Policy {
+	resources := make(map[schema.GroupVersionResource]map[ObjectSelector][]*Policy)
 	for _, policy := range policies {
 		url, err := f.GetPolicyServerURLRunningPolicy(context.Background(), policy)
 		if err != nil {
@@ -281,26 +254,26 @@ func (f *Fetcher) groupPoliciesByGVRAndObjectSelector(policies []policiesv1.Poli
 							continue
 						}
 
-						filter := ObjectFilter{
+						filter := ObjectSelector{
 							LabelSelector: policy.GetObjectSelector(),
 						}
 
-						p := PolicyWithPolicyServer{
+						p := Policy{
 							Policy:       policy,
 							PolicyServer: url,
 						}
 
 						if _, ok := resources[gvr]; !ok {
-							resources[gvr] = map[ObjectFilter][]PolicyWithPolicyServer{
-								filter: {p},
+							resources[gvr] = map[ObjectSelector][]*Policy{
+								filter: {&p},
 							}
 							continue
 						}
 
 						if _, ok := resources[gvr][filter]; !ok {
-							resources[gvr][filter] = []PolicyWithPolicyServer{p}
+							resources[gvr][filter] = []*Policy{&p}
 						} else {
-							resources[gvr][filter] = append(resources[gvr][filter], p)
+							resources[gvr][filter] = append(resources[gvr][filter], &p)
 						}
 					}
 				}

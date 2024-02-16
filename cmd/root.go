@@ -3,14 +3,21 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/kubewarden/audit-scanner/internal/report"
-
+	"github.com/kubewarden/audit-scanner/internal/constants"
 	logconfig "github.com/kubewarden/audit-scanner/internal/log"
 	"github.com/kubewarden/audit-scanner/internal/policies"
+	"github.com/kubewarden/audit-scanner/internal/report"
 	"github.com/kubewarden/audit-scanner/internal/resources"
 	"github.com/kubewarden/audit-scanner/internal/scanner"
+	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const defaultKubewardenNamespace = "kubewarden"
@@ -72,15 +79,34 @@ There will be a ClusterPolicyReport with results for cluster-wide resources.`,
 			return err
 		}
 
-		policiesFetcher, err := policies.NewFetcher(kubewardenNamespace, skippedNs, policyServerURL)
+		config := ctrl.GetConfigOrDie()
+		dynamicClient := dynamic.NewForConfigOrDie(config)
+		customScheme := scheme.Scheme
+		customScheme.AddKnownTypes(
+			schema.GroupVersion{Group: constants.KubewardenPoliciesGroup, Version: constants.KubewardenPoliciesVersion},
+			&policiesv1.ClusterAdmissionPolicy{},
+			&policiesv1.AdmissionPolicy{},
+			&policiesv1.ClusterAdmissionPolicyList{},
+			&policiesv1.AdmissionPolicyList{},
+			&policiesv1.PolicyServer{},
+		)
+		metav1.AddToGroupVersion(
+			customScheme, schema.GroupVersion{Group: constants.KubewardenPoliciesGroup, Version: constants.KubewardenPoliciesVersion},
+		)
+		client, err := client.New(config, client.Options{Scheme: customScheme})
 		if err != nil {
 			return err
 		}
-		resourcesFetcher, err := resources.NewFetcher(kubewardenNamespace)
+
+		policyFetcher, err := policies.NewFetcher(client, kubewardenNamespace, policyServerURL)
 		if err != nil {
 			return err
 		}
-		scanner, err := scanner.NewScanner(storeType, policiesFetcher, resourcesFetcher, outputScan, insecureSSL, caCertFile)
+		resourceFetcher, err := resources.NewFetcher(dynamicClient, client, kubewardenNamespace, skippedNs)
+		if err != nil {
+			return err
+		}
+		scanner, err := scanner.NewScanner(storeType, policyFetcher, resourceFetcher, outputScan, insecureSSL, caCertFile)
 		if err != nil {
 			return err
 		}

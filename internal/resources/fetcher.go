@@ -2,38 +2,53 @@ package resources
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gookit/goutil/dump"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	v1 "k8s.io/api/core/v1"
 	apimachineryerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/pager"
-	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const pageSize = 100
+
+// type ResourceFetcher interface {
+// 	GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector *metav1.LabelSelector) (*pager.ListPager, error)
+// 	// GetNamespace gets a given namespace
+// 	GetNamespace(namespace string) (*v1.Namespace, error)
+// 	// GetAuditedNamespaces gets all namespaces, minus those in the skipped ns list
+// 	GetAuditedNamespaces() (*v1.NamespaceList, error)
+// }
 
 // Fetcher fetches all auditable resources.
 // Uses a dynamic client to get all resources from the rules defined in a policy
 type Fetcher struct {
 	// dynamicClient is used to fetch resource data
 	dynamicClient dynamic.Interface
-	// Namespace where the Kubewarden components (e.g. policy server) are installed
-	// This is the namespace used to fetch the policy server resources
-	kubewardenNamespace string
+	// client knows about policies.kubewarden.io GVK
+	client client.Client
+	// list of skipped namespaces from audit, by name. It includes kubewardenNamespace
+	skippedNs []string
 }
 
-// NewFetcher returns a new fetcher with a dynamic client
-func NewFetcher(kubewardenNamespace string) (*Fetcher, error) {
-	config := ctrl.GetConfigOrDie()
-	dynamicClient := dynamic.NewForConfigOrDie(config)
+// NewFetcher returns a new resource fetcher
+func NewFetcher(dynamicClient dynamic.Interface, client client.Client, kubewardenNamespace string, skippedNs []string) (*Fetcher, error) {
+	skippedNs = append(skippedNs, kubewardenNamespace)
 
-	return &Fetcher{dynamicClient, kubewardenNamespace}, nil
+	return &Fetcher{
+		dynamicClient,
+		client,
+		skippedNs,
+	}, nil
 }
 
 func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector *metav1.LabelSelector) (*pager.ListPager, error) {
@@ -102,4 +117,36 @@ func (f *Fetcher) listResources(ctx context.Context,
 	}
 
 	return list, nil
+}
+
+// GetAuditedNamespaces gets all namespaces besides the ones in fetcher.skippedNs
+// This function cannot be tested with fake.client, as fake.client doesn't
+// support fields.OneTermNotEqualSelector()
+func (f *Fetcher) GetAuditedNamespaces() (*v1.NamespaceList, error) {
+	skipNsFields := fields.Everything()
+	for _, nsName := range f.skippedNs {
+		skipNsFields = fields.AndSelectors(skipNsFields, fields.OneTermNotEqualSelector("metadata.name", nsName))
+		log.Debug().Str("ns", nsName).Msg("skipping ns")
+	}
+
+	namespaceList := &v1.NamespaceList{}
+	err := f.client.List(context.Background(), namespaceList, &client.ListOptions{FieldSelector: skipNsFields})
+	if err != nil {
+		return nil, fmt.Errorf("can't list namespaces: %w", err)
+	}
+	return namespaceList, nil
+}
+
+func (f *Fetcher) GetNamespace(nsName string) (*v1.Namespace, error) {
+	namespace := &v1.Namespace{}
+	err := f.client.Get(context.Background(),
+		client.ObjectKey{
+			Name: nsName,
+		},
+		namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	return namespace, nil
 }

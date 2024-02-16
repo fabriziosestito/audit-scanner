@@ -24,37 +24,17 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	admv1 "k8s.io/api/admission/v1"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/tools/pager"
 )
 
-// A PoliciesFetcher interacts with the kubernetes api to return Kubewarden policies
-type PoliciesFetcher interface {
-	// GetPoliciesForANamespace gets all auditable policies for a given
-	// namespace, and the number of skipped policies
-	GetPoliciesForANamespace(namespace string) (policies.FetchedPolicies, int, int, error)
-	// GetNamespace gets a given namespace
-	GetNamespace(namespace string) (*v1.Namespace, error)
-	// GetAuditedNamespaces gets all namespaces, minus those in the skipped ns list
-	GetAuditedNamespaces() (*v1.NamespaceList, error)
-	// Get all auditable ClusterAdmissionPolicies and the number of skipped policies
-	GetClusterAdmissionPolicies() (policies.FetchedPolicies, int, int, error)
-}
-
-type ResourcesFetcher interface {
-	GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector *metav1.LabelSelector) (*pager.ListPager, error)
-}
-
-// A Scanner verifies that existing resources don't violate any of the policies
+// Scanner verifies that existing resources don't violate any of the policies
 type Scanner struct {
-	policiesFetcher  PoliciesFetcher
-	resourcesFetcher ResourcesFetcher
-	reportStore      report.PolicyReportStore
-	reportLogger     reportLogger.PolicyReportLogger
+	policyFetcher   *policies.Fetcher
+	resourceFetcher *resources.Fetcher
+	reportStore     report.PolicyReportStore
+	reportLogger    reportLogger.PolicyReportLogger
 	// http client used to make requests against the Policy Server
 	httpClient http.Client
 	outputScan bool
@@ -66,8 +46,8 @@ type Scanner struct {
 // PolicyServers endpoints.
 func NewScanner(
 	storeType string,
-	policiesFetcher PoliciesFetcher,
-	resourcesFetcher ResourcesFetcher,
+	policiesFetcher *policies.Fetcher,
+	resourceFetcher *resources.Fetcher,
 	outputScan bool,
 	insecureClient bool,
 	caCertFile string,
@@ -116,12 +96,12 @@ func NewScanner(
 	}
 
 	return &Scanner{
-		policiesFetcher:  policiesFetcher,
-		resourcesFetcher: resourcesFetcher,
-		reportStore:      store,
-		reportLogger:     reportLogger.PolicyReportLogger{},
-		httpClient:       httpClient,
-		outputScan:       outputScan,
+		policyFetcher:   policiesFetcher,
+		resourceFetcher: resourceFetcher,
+		reportStore:     store,
+		reportLogger:    reportLogger.PolicyReportLogger{},
+		httpClient:      httpClient,
+		outputScan:      outputScan,
 	}, nil
 }
 
@@ -143,12 +123,12 @@ func getPolicyReportStore(storeType string) (report.PolicyReportStore, error) { 
 func (s *Scanner) ScanNamespace(nsName string) error {
 	log.Info().Str("namespace", nsName).Msg("namespace scan started")
 
-	namespace, err := s.policiesFetcher.GetNamespace(nsName)
+	namespace, err := s.resourceFetcher.GetNamespace(nsName)
 	if err != nil {
 		return err
 	}
 
-	policies, policiesNum, skippedNum, err := s.policiesFetcher.GetPoliciesForANamespace(nsName)
+	policies, err := s.policyFetcher.GetPoliciesForANamespace(nsName)
 	if err != nil {
 		return err
 	}
@@ -156,13 +136,13 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 	log.Info().
 		Str("namespace", nsName).
 		Dict("dict", zerolog.Dict().
-			Int("policies to evaluate", policiesNum).
-			Int("policies skipped", skippedNum),
+			Int("policies to evaluate", policies.PolicyNum).
+			Int("policies skipped", policies.SkippedNum),
 		).Msg("policy count")
 
 	// create PolicyReport
 	namespacedsReport := report.NewPolicyReport(namespace)
-	namespacedsReport.Summary.Skip = skippedNum
+	namespacedsReport.Summary.Skip = policies.SkippedNum
 
 	// old policy report to be used as cache
 	previousNamespacedReport, err := s.reportStore.GetPolicyReport(nsName)
@@ -174,9 +154,9 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 			Msg("error when obtaining PolicyReport")
 	}
 
-	for gvr, objectFilters := range policies {
+	for gvr, objectFilters := range policies.PoliciesByGVRAndObjectSelector {
 		for filter, policies := range objectFilters {
-			pager, err := s.resourcesFetcher.GetResources(gvr, nsName, filter.LabelSelector)
+			pager, err := s.resourceFetcher.GetResources(gvr, nsName, filter.LabelSelector)
 			if err != nil {
 				return err
 			}
@@ -213,7 +193,7 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 // Result, so it can continue with the next audit, or next Result.
 func (s *Scanner) ScanAllNamespaces() error {
 	log.Info().Msg("all-namespaces scan started")
-	nsList, err := s.policiesFetcher.GetAuditedNamespaces()
+	nsList, err := s.resourceFetcher.GetAuditedNamespaces()
 	if err != nil {
 		log.Error().Err(err).Msg("error scanning all namespaces")
 	}
@@ -235,20 +215,20 @@ func (s *Scanner) ScanAllNamespaces() error {
 func (s *Scanner) ScanClusterWideResources() error {
 	log.Info().Msg("clusterwide resources scan started")
 
-	policies, policyNum, skippedNum, err := s.policiesFetcher.GetClusterAdmissionPolicies()
+	policies, err := s.policyFetcher.GetClusterAdmissionPolicies()
 	if err != nil {
 		return err
 	}
 
 	log.Info().
 		Dict("dict", zerolog.Dict().
-			Int("policies to evaluate", policyNum).
-			Int("policies skipped", skippedNum),
+			Int("policies to evaluate", policies.PolicyNum).
+			Int("policies skipped", policies.SkippedNum),
 		).Msg("cluster admission policies count")
 
 	// create PolicyReport
 	clusterReport := report.NewClusterPolicyReport(constants.DefaultClusterwideReportName)
-	clusterReport.Summary.Skip = skippedNum
+	clusterReport.Summary.Skip = policies.SkippedNum
 
 	// old policy report to be used as cache
 	previousClusterReport, err := s.reportStore.GetClusterPolicyReport(constants.DefaultClusterwideReportName)
@@ -256,9 +236,9 @@ func (s *Scanner) ScanClusterWideResources() error {
 		log.Info().Err(err).Msg("no-prexisting ClusterPolicyReport, will create one at the end of the scan")
 	}
 
-	for gvr, objectFilters := range policies {
+	for gvr, objectFilters := range policies.PoliciesByGVRAndObjectSelector {
 		for filter, policies := range objectFilters {
-			pager, err := s.resourcesFetcher.GetResources(gvr, "", filter.LabelSelector)
+			pager, err := s.resourceFetcher.GetResources(gvr, "", filter.LabelSelector)
 			if err != nil {
 				return err
 			}
@@ -287,7 +267,7 @@ func (s *Scanner) ScanClusterWideResources() error {
 	return nil
 }
 
-func auditClusterResource(policies []policies.PolicyWithPolicyServer, resource unstructured.Unstructured, httpClient *http.Client, clusterReport, previousClusterReport *report.ClusterPolicyReport) {
+func auditClusterResource(policies []*policies.Policy, resource unstructured.Unstructured, httpClient *http.Client, clusterReport, previousClusterReport *report.ClusterPolicyReport) {
 	for _, p := range policies {
 		url := p.PolicyServer
 		policy := p.Policy
@@ -305,7 +285,7 @@ func auditClusterResource(policies []policies.PolicyWithPolicyServer, resource u
 			).Msg("Previous result found. Reusing result")
 			continue
 		}
-		admissionRequest := resources.GenerateAdmissionReview(resource)
+		admissionRequest := newAdmissionReview(resource)
 		auditResponse, responseErr := sendAdmissionReviewToPolicyServer(url, admissionRequest, httpClient)
 		if responseErr != nil {
 			// log error, will end in ClusterPolicyReportResult too
@@ -329,7 +309,7 @@ func auditClusterResource(policies []policies.PolicyWithPolicyServer, resource u
 	}
 }
 
-func auditResource(policies []policies.PolicyWithPolicyServer, resource unstructured.Unstructured, httpClient *http.Client, previousNsReport, nsReport *report.PolicyReport) {
+func auditResource(policies []*policies.Policy, resource unstructured.Unstructured, httpClient *http.Client, previousNsReport, nsReport *report.PolicyReport) {
 	for _, p := range policies {
 		url := p.PolicyServer
 		policy := p.Policy
@@ -349,7 +329,7 @@ func auditResource(policies []policies.PolicyWithPolicyServer, resource unstruct
 			continue
 		}
 
-		admissionRequest := resources.GenerateAdmissionReview(resource)
+		admissionRequest := newAdmissionReview(resource)
 		auditResponse, responseErr := sendAdmissionReviewToPolicyServer(url, admissionRequest, httpClient)
 		if responseErr != nil {
 			// log responseErr, will end in PolicyReportResult too
