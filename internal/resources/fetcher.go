@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/pager"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const pageSize = 100
@@ -32,26 +32,26 @@ const pageSize = 100
 // Fetcher fetches all auditable resources.
 // Uses a dynamic client to get all resources from the rules defined in a policy
 type Fetcher struct {
-	// dynamicClient is used to fetch resource data
+	// dynamicClient is used to fetch resource lists
 	dynamicClient dynamic.Interface
-	// client knows about policies.kubewarden.io GVK
-	client client.Client
+	// client is used to fetch namespaces
+	clientset kubernetes.Interface
 	// list of skipped namespaces from audit, by name. It includes kubewardenNamespace
 	skippedNs []string
 }
 
 // NewFetcher returns a new resource fetcher
-func NewFetcher(dynamicClient dynamic.Interface, client client.Client, kubewardenNamespace string, skippedNs []string) (*Fetcher, error) {
+func NewFetcher(dynamicClient dynamic.Interface, clientset kubernetes.Interface, kubewardenNamespace string, skippedNs []string) (*Fetcher, error) {
 	skippedNs = append(skippedNs, kubewardenNamespace)
 
 	return &Fetcher{
 		dynamicClient,
-		client,
+		clientset,
 		skippedNs,
 	}, nil
 }
 
-func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector *metav1.LabelSelector) (*pager.ListPager, error) {
+func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector string) (*pager.ListPager, error) {
 	page := 0
 
 	listPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
@@ -91,7 +91,7 @@ func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, l
 func (f *Fetcher) listResources(ctx context.Context,
 	gvr schema.GroupVersionResource,
 	nsName string,
-	labelSelector *metav1.LabelSelector,
+	labelSelector string,
 	opts metav1.ListOptions,
 ) (
 	*unstructured.UnstructuredList, error,
@@ -102,51 +102,27 @@ func (f *Fetcher) listResources(ctx context.Context,
 		Resource: gvr.Resource,
 	}
 
-	var list *unstructured.UnstructuredList
-	var err error
+	opts.LabelSelector = labelSelector
 
-	if labelSelector != nil {
-		labelSelector := metav1.FormatLabelSelector(labelSelector)
-		opts.LabelSelector = labelSelector
-	}
-
-	list, err = f.dynamicClient.Resource(resourceID).Namespace(nsName).List(ctx, opts)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return list, nil
+	return f.dynamicClient.Resource(resourceID).Namespace(nsName).List(ctx, opts)
 }
 
 // GetAuditedNamespaces gets all namespaces besides the ones in fetcher.skippedNs
-// This function cannot be tested with fake.client, as fake.client doesn't
-// support fields.OneTermNotEqualSelector()
-func (f *Fetcher) GetAuditedNamespaces() (*v1.NamespaceList, error) {
+func (f *Fetcher) GetAuditedNamespaces(ctx context.Context) (*v1.NamespaceList, error) {
+	// This function cannot be tested with fake client, as filtering is done server-side
 	skipNsFields := fields.Everything()
 	for _, nsName := range f.skippedNs {
 		skipNsFields = fields.AndSelectors(skipNsFields, fields.OneTermNotEqualSelector("metadata.name", nsName))
 		log.Debug().Str("ns", nsName).Msg("skipping ns")
 	}
 
-	namespaceList := &v1.NamespaceList{}
-	err := f.client.List(context.Background(), namespaceList, &client.ListOptions{FieldSelector: skipNsFields})
+	namespaceList, err := f.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{FieldSelector: skipNsFields.String()})
 	if err != nil {
 		return nil, fmt.Errorf("can't list namespaces: %w", err)
 	}
 	return namespaceList, nil
 }
 
-func (f *Fetcher) GetNamespace(nsName string) (*v1.Namespace, error) {
-	namespace := &v1.Namespace{}
-	err := f.client.Get(context.Background(),
-		client.ObjectKey{
-			Name: nsName,
-		},
-		namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	return namespace, nil
+func (f *Fetcher) GetNamespace(ctx context.Context, nsName string) (*v1.Namespace, error) {
+	return f.clientset.CoreV1().Namespaces().Get(ctx, nsName, metav1.GetOptions{})
 }

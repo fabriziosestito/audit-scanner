@@ -34,7 +34,6 @@ type Scanner struct {
 	policyFetcher   *policies.Fetcher
 	resourceFetcher *resources.Fetcher
 	reportStore     report.PolicyReportStore
-	reportLogger    reportLogger.PolicyReportLogger
 	// http client used to make requests against the Policy Server
 	httpClient http.Client
 	outputScan bool
@@ -99,7 +98,6 @@ func NewScanner(
 		policyFetcher:   policiesFetcher,
 		resourceFetcher: resourceFetcher,
 		reportStore:     store,
-		reportLogger:    reportLogger.PolicyReportLogger{},
 		httpClient:      httpClient,
 		outputScan:      outputScan,
 	}, nil
@@ -122,13 +120,13 @@ func getPolicyReportStore(storeType string) (report.PolicyReportStore, error) { 
 // Result, so it can continue with the next audit, or next Result.
 func (s *Scanner) ScanNamespace(nsName string) error {
 	log.Info().Str("namespace", nsName).Msg("namespace scan started")
-
-	namespace, err := s.resourceFetcher.GetNamespace(nsName)
+	ctx := context.Background()
+	namespace, err := s.resourceFetcher.GetNamespace(ctx, nsName)
 	if err != nil {
 		return err
 	}
 
-	policies, err := s.policyFetcher.GetPoliciesForANamespace(nsName)
+	policies, err := s.policyFetcher.GetPoliciesForANamespace(ctx, nsName)
 	if err != nil {
 		return err
 	}
@@ -155,14 +153,17 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 	}
 
 	for gvr, objectFilters := range policies.PoliciesByGVRAndObjectSelector {
-		for filter, policies := range objectFilters {
-			pager, err := s.resourceFetcher.GetResources(gvr, nsName, filter.LabelSelector)
+		for labelSelector, policies := range objectFilters {
+			pager, err := s.resourceFetcher.GetResources(gvr, nsName, labelSelector)
 			if err != nil {
 				return err
 			}
 
 			err = pager.EachListItem(context.Background(), metav1.ListOptions{}, func(obj runtime.Object) error {
-				resource := obj.(*unstructured.Unstructured)
+				resource, ok := obj.(*unstructured.Unstructured)
+				if !ok {
+					return fmt.Errorf("failed to convert runtime.Object to *unstructured.Unstructured")
+				}
 				auditResource(policies, *resource, &s.httpClient, &previousNamespacedReport, &namespacedsReport)
 
 				return nil
@@ -180,7 +181,7 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 	log.Info().Str("namespace", nsName).Msg("namespace scan finished")
 
 	if s.outputScan {
-		s.reportLogger.LogPolicyReport(&namespacedsReport)
+		reportLogger.LogPolicyReport(&namespacedsReport)
 	}
 
 	return nil
@@ -193,7 +194,7 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 // Result, so it can continue with the next audit, or next Result.
 func (s *Scanner) ScanAllNamespaces() error {
 	log.Info().Msg("all-namespaces scan started")
-	nsList, err := s.resourceFetcher.GetAuditedNamespaces()
+	nsList, err := s.resourceFetcher.GetAuditedNamespaces(context.Background())
 	if err != nil {
 		log.Error().Err(err).Msg("error scanning all namespaces")
 	}
@@ -214,8 +215,9 @@ func (s *Scanner) ScanAllNamespaces() error {
 // Result, so it can continue with the next audit, or next Result.
 func (s *Scanner) ScanClusterWideResources() error {
 	log.Info().Msg("clusterwide resources scan started")
+	ctx := context.Background()
 
-	policies, err := s.policyFetcher.GetClusterAdmissionPolicies()
+	policies, err := s.policyFetcher.GetClusterAdmissionPolicies(ctx)
 	if err != nil {
 		return err
 	}
@@ -237,14 +239,18 @@ func (s *Scanner) ScanClusterWideResources() error {
 	}
 
 	for gvr, objectFilters := range policies.PoliciesByGVRAndObjectSelector {
-		for filter, policies := range objectFilters {
-			pager, err := s.resourceFetcher.GetResources(gvr, "", filter.LabelSelector)
+		for labelSelector, policies := range objectFilters {
+			pager, err := s.resourceFetcher.GetResources(gvr, "", labelSelector)
 			if err != nil {
 				return err
 			}
 
 			err = pager.EachListItem(context.Background(), metav1.ListOptions{}, func(obj runtime.Object) error {
-				resource := obj.(*unstructured.Unstructured)
+				resource, ok := obj.(*unstructured.Unstructured)
+				if !ok {
+					return fmt.Errorf("failed to convert runtime.Object to *unstructured.Unstructured")
+				}
+
 				auditClusterResource(policies, *resource, &s.httpClient, &clusterReport, &previousClusterReport)
 
 				return nil
@@ -261,7 +267,7 @@ func (s *Scanner) ScanClusterWideResources() error {
 	log.Info().Msg("clusterwide resources scan finished")
 
 	if s.outputScan {
-		s.reportLogger.LogClusterPolicyReport(&clusterReport)
+		reportLogger.LogClusterPolicyReport(&clusterReport)
 	}
 
 	return nil
