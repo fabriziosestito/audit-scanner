@@ -13,7 +13,7 @@ var SupportedTypes = [2]string{KUBERNETES, MEMORY}
 // It also provides functions to read, delete and save these resources,
 // only updating them if there is indeed a change in data.
 //
-//go:generate mockery
+//go:generate mockery --name=PolicyReportStore
 type PolicyReportStore interface {
 	// GetPolicyReport returns the Policy Report defined inside a given namespace.
 	// An empty PolicyReport is returned when nothing is found

@@ -1,12 +1,17 @@
 package scanner
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/kubewarden/audit-scanner/internal/k8s"
 	"github.com/kubewarden/audit-scanner/internal/policies"
+	"github.com/kubewarden/audit-scanner/internal/report"
+	reportMocks "github.com/kubewarden/audit-scanner/internal/report/mocks"
 	"github.com/kubewarden/audit-scanner/internal/testutils"
 	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,6 +23,10 @@ import (
 )
 
 func TestScanAllNamespaces(t *testing.T) {
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	}))
+	defer svr.Close()
+
 	policyServer := &policiesv1.PolicyServer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
@@ -125,14 +134,15 @@ func TestScanAllNamespaces(t *testing.T) {
 		Status(policiesv1.PolicyStatusActive).
 		Build()
 
-	dynamicClient := dynamicFake.NewSimpleDynamicClient(scheme.Scheme)
-	clientset := fake.NewSimpleClientset(
-		namespace1,
-		namespace2,
+	dynamicClient := dynamicFake.NewSimpleDynamicClient(
+		scheme.Scheme,
 		deployment1,
 		deployment2,
 		pod1,
-		pod2,
+		pod2)
+	clientset := fake.NewSimpleClientset(
+		namespace1,
+		namespace2,
 	)
 	client := testutils.NewFakeClient(
 		policyServer,
@@ -145,10 +155,16 @@ func TestScanAllNamespaces(t *testing.T) {
 	k8sClient, err := k8s.NewClient(dynamicClient, clientset, "kubewarden", nil)
 	require.NoError(t, err)
 
-	policiesClient, err := policies.NewClient(client, "kubewarden", "")
+	policiesClient, err := policies.NewClient(client, "kubewarden", svr.URL)
 	require.NoError(t, err)
 
-	scanner, err := NewScanner(policiesClient, k8sClient, nil, false, true, "")
+	mockPolicyReportStore := reportMocks.NewPolicyReportStore(t)
+	mockPolicyReportStore.EXPECT().GetPolicyReport("namespace1").Return(report.PolicyReport{}, nil).Once()
+	mockPolicyReportStore.EXPECT().SavePolicyReport(mock.Anything).Return(nil).Once()
+	mockPolicyReportStore.EXPECT().GetPolicyReport("namespace2").Return(report.PolicyReport{}, nil).Once()
+	mockPolicyReportStore.EXPECT().SavePolicyReport(mock.Anything).Return(nil).Once()
+
+	scanner, err := NewScanner(policiesClient, k8sClient, mockPolicyReportStore, false, true, "")
 	require.NoError(t, err)
 
 	err = scanner.ScanAllNamespaces()

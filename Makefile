@@ -27,6 +27,9 @@ unit-tests: fmt vet ## Run unit tests.
 build: # fmt vet lint ## Build audit-scanner binary.
 	go build -o bin/audit-scanner .
 
+generate: ## Generate code.
+	go generate ./...
+
 .PHONY: docker-build
 docker-build: unit-tests
 	DOCKER_BUILDKIT=1 docker build -t ${IMG} .
