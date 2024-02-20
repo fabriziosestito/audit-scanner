@@ -13,14 +13,11 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/gookit/goutil/dump"
+	"github.com/kubewarden/audit-scanner/internal/constants"
+	"github.com/kubewarden/audit-scanner/internal/k8s"
 	reportLogger "github.com/kubewarden/audit-scanner/internal/log"
 	"github.com/kubewarden/audit-scanner/internal/policies"
-
-	"github.com/kubewarden/audit-scanner/internal/constants"
 	"github.com/kubewarden/audit-scanner/internal/report"
-	"github.com/kubewarden/audit-scanner/internal/resources"
-
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	admv1 "k8s.io/api/admission/v1"
@@ -31,22 +28,22 @@ import (
 
 // Scanner verifies that existing resources don't violate any of the policies
 type Scanner struct {
-	policyFetcher   *policies.Fetcher
-	resourceFetcher *resources.Fetcher
-	reportStore     report.PolicyReportStore
+	policiesClient *policies.Client
+	k8sClient      *k8s.Client
+	reportStore    report.PolicyReportStore
 	// http client used to make requests against the Policy Server
 	httpClient http.Client
 	outputScan bool
 }
 
-// NewScanner creates a new scanner with the PoliciesFetcher provided. If
-// insecureClient is false, it will read the caCertFile and add it to the in-app
+// NewScanner creates a new scanner
+// If insecureClient is false, it will read the caCertFile and add it to the in-app
 // cert trust store. This gets used by the httpClient when connection to
 // PolicyServers endpoints.
 func NewScanner(
 	storeType string,
-	policiesFetcher *policies.Fetcher,
-	resourceFetcher *resources.Fetcher,
+	policiesClient *policies.Client,
+	k8sClient *k8s.Client,
 	outputScan bool,
 	insecureClient bool,
 	caCertFile string,
@@ -95,11 +92,11 @@ func NewScanner(
 	}
 
 	return &Scanner{
-		policyFetcher:   policiesFetcher,
-		resourceFetcher: resourceFetcher,
-		reportStore:     store,
-		httpClient:      httpClient,
-		outputScan:      outputScan,
+		policiesClient: policiesClient,
+		k8sClient:      k8sClient,
+		reportStore:    store,
+		httpClient:     httpClient,
+		outputScan:     outputScan,
 	}, nil
 }
 
@@ -121,12 +118,12 @@ func getPolicyReportStore(storeType string) (report.PolicyReportStore, error) { 
 func (s *Scanner) ScanNamespace(nsName string) error {
 	log.Info().Str("namespace", nsName).Msg("namespace scan started")
 	ctx := context.Background()
-	namespace, err := s.resourceFetcher.GetNamespace(ctx, nsName)
+	namespace, err := s.k8sClient.GetNamespace(ctx, nsName)
 	if err != nil {
 		return err
 	}
 
-	policies, err := s.policyFetcher.GetPoliciesForANamespace(ctx, nsName)
+	policies, err := s.policiesClient.GetPoliciesForANamespace(ctx, nsName)
 	if err != nil {
 		return err
 	}
@@ -152,9 +149,9 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 			Msg("error when obtaining PolicyReport")
 	}
 
-	for gvr, objectFilters := range policies.PoliciesByGVRAndObjectSelector {
+	for gvr, objectFilters := range policies.PoliciesByGVRAndLabelSelector {
 		for labelSelector, policies := range objectFilters {
-			pager, err := s.resourceFetcher.GetResources(gvr, nsName, labelSelector)
+			pager, err := s.k8sClient.GetResources(gvr, nsName, labelSelector)
 			if err != nil {
 				return err
 			}
@@ -187,14 +184,13 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 	return nil
 }
 
-// ScanAllNamespaces scans resources for all namespaces. Skips those namespaces
-// passed in the skipped list on the policy fetcher.
+// ScanAllNamespaces scans resources for all namespaces, except the ones in the skipped list.
 // Returns errors if there's any when fetching policies or resources, but only
 // logs them if there's a problem auditing the resource of saving the Report or
 // Result, so it can continue with the next audit, or next Result.
 func (s *Scanner) ScanAllNamespaces() error {
 	log.Info().Msg("all-namespaces scan started")
-	nsList, err := s.resourceFetcher.GetAuditedNamespaces(context.Background())
+	nsList, err := s.k8sClient.GetAuditedNamespaces(context.Background())
 	if err != nil {
 		log.Error().Err(err).Msg("error scanning all namespaces")
 	}
@@ -217,7 +213,7 @@ func (s *Scanner) ScanClusterWideResources() error {
 	log.Info().Msg("clusterwide resources scan started")
 	ctx := context.Background()
 
-	policies, err := s.policyFetcher.GetClusterAdmissionPolicies(ctx)
+	policies, err := s.policiesClient.GetClusterWidePolicies(ctx)
 	if err != nil {
 		return err
 	}
@@ -238,9 +234,9 @@ func (s *Scanner) ScanClusterWideResources() error {
 		log.Info().Err(err).Msg("no-prexisting ClusterPolicyReport, will create one at the end of the scan")
 	}
 
-	for gvr, objectFilters := range policies.PoliciesByGVRAndObjectSelector {
+	for gvr, objectFilters := range policies.PoliciesByGVRAndLabelSelector {
 		for labelSelector, policies := range objectFilters {
-			pager, err := s.resourceFetcher.GetResources(gvr, "", labelSelector)
+			pager, err := s.k8sClient.GetResources(gvr, "", labelSelector)
 			if err != nil {
 				return err
 			}
@@ -321,7 +317,6 @@ func auditResource(policies []*policies.Policy, resource unstructured.Unstructur
 		policy := p.Policy
 
 		if result := previousNsReport.GetReusablePolicyReportResult(policy, resource); result != nil {
-			dump.P("here")
 			// We have a result from the same policy version for the same resource instance.
 			// Skip the evaluation
 			nsReport.AddResult(result)

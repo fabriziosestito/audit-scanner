@@ -1,10 +1,9 @@
-package resources
+package k8s
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	v1 "k8s.io/api/core/v1"
@@ -21,37 +20,28 @@ import (
 
 const pageSize = 100
 
-// type ResourceFetcher interface {
-// 	GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector *metav1.LabelSelector) (*pager.ListPager, error)
-// 	// GetNamespace gets a given namespace
-// 	GetNamespace(namespace string) (*v1.Namespace, error)
-// 	// GetAuditedNamespaces gets all namespaces, minus those in the skipped ns list
-// 	GetAuditedNamespaces() (*v1.NamespaceList, error)
-// }
-
-// Fetcher fetches all auditable resources.
-// Uses a dynamic client to get all resources from the rules defined in a policy
-type Fetcher struct {
-	// dynamicClient is used to fetch resource lists
+// A client to get resources and namespaces from a Kubernetes cluster
+type Client struct {
+	// dynamicClient is used to get resource lists
 	dynamicClient dynamic.Interface
-	// client is used to fetch namespaces
+	// client is used to get namespaces
 	clientset kubernetes.Interface
 	// list of skipped namespaces from audit, by name. It includes kubewardenNamespace
 	skippedNs []string
 }
 
-// NewFetcher returns a new resource fetcher
-func NewFetcher(dynamicClient dynamic.Interface, clientset kubernetes.Interface, kubewardenNamespace string, skippedNs []string) (*Fetcher, error) {
+// NewClient returns a new client
+func NewClient(dynamicClient dynamic.Interface, clientset kubernetes.Interface, kubewardenNamespace string, skippedNs []string) (*Client, error) {
 	skippedNs = append(skippedNs, kubewardenNamespace)
 
-	return &Fetcher{
+	return &Client{
 		dynamicClient,
 		clientset,
 		skippedNs,
 	}, nil
 }
 
-func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector string) (*pager.ListPager, error) {
+func (f *Client) GetResources(gvr schema.GroupVersionResource, nsName string, labelSelector string) (*pager.ListPager, error) {
 	page := 0
 
 	listPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
@@ -78,8 +68,6 @@ func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, l
 			return nil, err
 		}
 
-		dump.P(page, gvr.String(), len(resources.Items))
-
 		return resources, nil
 	})
 
@@ -88,7 +76,7 @@ func (f *Fetcher) GetResources(gvr schema.GroupVersionResource, nsName string, l
 	return listPager, nil
 }
 
-func (f *Fetcher) listResources(ctx context.Context,
+func (f *Client) listResources(ctx context.Context,
 	gvr schema.GroupVersionResource,
 	nsName string,
 	labelSelector string,
@@ -107,8 +95,8 @@ func (f *Fetcher) listResources(ctx context.Context,
 	return f.dynamicClient.Resource(resourceID).Namespace(nsName).List(ctx, opts)
 }
 
-// GetAuditedNamespaces gets all namespaces besides the ones in fetcher.skippedNs
-func (f *Fetcher) GetAuditedNamespaces(ctx context.Context) (*v1.NamespaceList, error) {
+// GetAuditedNamespaces gets all namespaces besides the ones in skippedNs
+func (f *Client) GetAuditedNamespaces(ctx context.Context) (*v1.NamespaceList, error) {
 	// This function cannot be tested with fake client, as filtering is done server-side
 	skipNsFields := fields.Everything()
 	for _, nsName := range f.skippedNs {
@@ -123,6 +111,6 @@ func (f *Fetcher) GetAuditedNamespaces(ctx context.Context) (*v1.NamespaceList, 
 	return namespaceList, nil
 }
 
-func (f *Fetcher) GetNamespace(ctx context.Context, nsName string) (*v1.Namespace, error) {
+func (f *Client) GetNamespace(ctx context.Context, nsName string) (*v1.Namespace, error) {
 	return f.clientset.CoreV1().Namespaces().Get(ctx, nsName, metav1.GetOptions{})
 }

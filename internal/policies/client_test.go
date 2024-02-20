@@ -216,14 +216,14 @@ func TestGetPoliciesForANamespace(t *testing.T) {
 		admissionPolicy4,
 	)
 
-	fetcher, err := NewFetcher(client, "kubewarden", "")
+	policiesClient, err := NewClient(client, "kubewarden", "")
 	require.NoError(t, err)
 
-	policies, err := fetcher.GetPoliciesForANamespace(context.Background(), "test")
+	policies, err := policiesClient.GetPoliciesForANamespace(context.Background(), "test")
 	require.NoError(t, err)
 
 	expectedPolicies := &Policies{
-		PoliciesByGVRAndObjectSelector: map[schema.GroupVersionResource]map[string][]*Policy{
+		PoliciesByGVRAndLabelSelector: map[schema.GroupVersionResource]map[string][]*Policy{
 			{
 				Group:    "",
 				Version:  "v1",
@@ -387,14 +387,14 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 		admissionPolicy1,
 	)
 
-	fetcher, err := NewFetcher(client, "kubewarden", "")
+	policiesClient, err := NewClient(client, "kubewarden", "")
 	require.NoError(t, err)
 
-	policies, err := fetcher.GetClusterAdmissionPolicies(context.Background())
+	policies, err := policiesClient.GetClusterWidePolicies(context.Background())
 	require.NoError(t, err)
 
 	expectedPolicies := &Policies{
-		PoliciesByGVRAndObjectSelector: map[schema.GroupVersionResource]map[string][]*Policy{
+		PoliciesByGVRAndLabelSelector: map[schema.GroupVersionResource]map[string][]*Policy{
 			{
 				Group:    "",
 				Version:  "v1",

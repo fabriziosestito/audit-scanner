@@ -3,10 +3,10 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/kubewarden/audit-scanner/internal/k8s"
 	logconfig "github.com/kubewarden/audit-scanner/internal/log"
 	"github.com/kubewarden/audit-scanner/internal/policies"
 	"github.com/kubewarden/audit-scanner/internal/report"
-	"github.com/kubewarden/audit-scanner/internal/resources"
 	"github.com/kubewarden/audit-scanner/internal/scanner"
 	"github.com/kubewarden/audit-scanner/internal/scheme"
 	"github.com/rs/zerolog/log"
@@ -86,15 +86,15 @@ There will be a ClusterPolicyReport with results for cluster-wide resources.`,
 			return err
 		}
 
-		policyFetcher, err := policies.NewFetcher(client, kubewardenNamespace, policyServerURL)
+		policiesClient, err := policies.NewClient(client, kubewardenNamespace, policyServerURL)
 		if err != nil {
 			return err
 		}
-		resourceFetcher, err := resources.NewFetcher(dynamicClient, clientset, kubewardenNamespace, skippedNs)
+		k8sClient, err := k8s.NewClient(dynamicClient, clientset, kubewardenNamespace, skippedNs)
 		if err != nil {
 			return err
 		}
-		scanner, err := scanner.NewScanner(storeType, policyFetcher, resourceFetcher, outputScan, insecureSSL, caCertFile)
+		scanner, err := scanner.NewScanner(storeType, policiesClient, k8sClient, outputScan, insecureSSL, caCertFile)
 		if err != nil {
 			return err
 		}

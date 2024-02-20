@@ -1,4 +1,4 @@
-package resources
+package k8s
 
 import (
 	"context"
@@ -26,12 +26,10 @@ func TestGetResources(t *testing.T) {
 	dynamicClient := dynamicFake.NewSimpleDynamicClient(scheme.Scheme, pods...)
 	fakeClient := fake.NewSimpleClientset()
 
-	fetcher, err := NewFetcher(dynamicClient, fakeClient, "kubewarden", nil)
-	if err != nil {
-		t.Errorf("Error creating fetcher: %s", err)
-	}
+	k8sClient, err := NewClient(dynamicClient, fakeClient, "kubewarden", nil)
+	require.NoError(t, err)
 
-	pager, err := fetcher.GetResources(schema.GroupVersionResource{
+	pager, err := k8sClient.GetResources(schema.GroupVersionResource{
 		Group:    "",
 		Version:  "v1",
 		Resource: "pods",
