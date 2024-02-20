@@ -6,7 +6,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	apimachineryerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -96,7 +96,7 @@ func (f *Client) listResources(ctx context.Context,
 }
 
 // GetAuditedNamespaces gets all namespaces besides the ones in skippedNs
-func (f *Client) GetAuditedNamespaces(ctx context.Context) (*v1.NamespaceList, error) {
+func (f *Client) GetAuditedNamespaces(ctx context.Context) (*corev1.NamespaceList, error) {
 	// This function cannot be tested with fake client, as filtering is done server-side
 	skipNsFields := fields.Everything()
 	for _, nsName := range f.skippedNs {
@@ -111,6 +111,6 @@ func (f *Client) GetAuditedNamespaces(ctx context.Context) (*v1.NamespaceList, e
 	return namespaceList, nil
 }
 
-func (f *Client) GetNamespace(ctx context.Context, nsName string) (*v1.Namespace, error) {
+func (f *Client) GetNamespace(ctx context.Context, nsName string) (*corev1.Namespace, error) {
 	return f.clientset.CoreV1().Namespaces().Get(ctx, nsName, metav1.GetOptions{})
 }

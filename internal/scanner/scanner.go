@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/kubewarden/audit-scanner/internal/constants"
 	"github.com/kubewarden/audit-scanner/internal/k8s"
@@ -20,7 +21,7 @@ import (
 	"github.com/kubewarden/audit-scanner/internal/report"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	admv1 "k8s.io/api/admission/v1"
+	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,9 +29,9 @@ import (
 
 // Scanner verifies that existing resources don't violate any of the policies
 type Scanner struct {
-	policiesClient *policies.Client
-	k8sClient      *k8s.Client
-	reportStore    report.PolicyReportStore
+	policiesClient    *policies.Client
+	k8sClient         *k8s.Client
+	policyReportStore report.PolicyReportStore
 	// http client used to make requests against the Policy Server
 	httpClient http.Client
 	outputScan bool
@@ -41,18 +42,13 @@ type Scanner struct {
 // cert trust store. This gets used by the httpClient when connection to
 // PolicyServers endpoints.
 func NewScanner(
-	storeType string,
 	policiesClient *policies.Client,
 	k8sClient *k8s.Client,
+	policyReportStore report.PolicyReportStore,
 	outputScan bool,
 	insecureClient bool,
 	caCertFile string,
 ) (*Scanner, error) {
-	store, err := getPolicyReportStore(storeType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create PolicyReportStore: %w", err)
-	}
-
 	// Get the SystemCertPool to build an in-app cert pool from it
 	// Continue with an empty pool on error
 	rootCAs, _ := x509.SystemCertPool()
@@ -73,9 +69,8 @@ func NewScanner(
 			Msg("appended cert file to in-app RootCAs trust store")
 	}
 
-	// initialize httpClient while conserving default settings
 	httpClient := *http.DefaultClient
-	// TODO: (fabrizio) set timeout
+	httpClient.Timeout = 10 * time.Second
 	httpClient.Transport = http.DefaultTransport
 	transport, ok := httpClient.Transport.(*http.Transport)
 	if !ok {
@@ -92,23 +87,12 @@ func NewScanner(
 	}
 
 	return &Scanner{
-		policiesClient: policiesClient,
-		k8sClient:      k8sClient,
-		reportStore:    store,
-		httpClient:     httpClient,
-		outputScan:     outputScan,
+		policiesClient:    policiesClient,
+		k8sClient:         k8sClient,
+		policyReportStore: policyReportStore,
+		httpClient:        httpClient,
+		outputScan:        outputScan,
 	}, nil
-}
-
-func getPolicyReportStore(storeType string) (report.PolicyReportStore, error) { //nolint:ireturn // returning a generic type is ok here
-	switch storeType {
-	case report.KUBERNETES:
-		return report.NewKubernetesPolicyReportStore()
-	case report.MEMORY:
-		return report.NewMemoryPolicyReportStore(), nil
-	default:
-		return nil, fmt.Errorf("invalid policyReport store type: %s", storeType)
-	}
 }
 
 // ScanNamespace scans resources for a given namespace.
@@ -140,7 +124,7 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 	namespacedsReport.Summary.Skip = policies.SkippedNum
 
 	// old policy report to be used as cache
-	previousNamespacedReport, err := s.reportStore.GetPolicyReport(nsName)
+	previousNamespacedReport, err := s.policyReportStore.GetPolicyReport(nsName)
 	if errors.Is(err, constants.ErrResourceNotFound) {
 		log.Info().Str("namespace", nsName).
 			Msg("no pre-existing PolicyReport, will create one at end of the scan if needed")
@@ -171,7 +155,7 @@ func (s *Scanner) ScanNamespace(nsName string) error {
 		}
 	}
 
-	if err := s.reportStore.SavePolicyReport(&namespacedsReport); err != nil {
+	if err := s.policyReportStore.SavePolicyReport(&namespacedsReport); err != nil {
 		log.Error().Err(err).Msg("error adding PolicyReport to store")
 	}
 
@@ -194,15 +178,15 @@ func (s *Scanner) ScanAllNamespaces() error {
 	if err != nil {
 		log.Error().Err(err).Msg("error scanning all namespaces")
 	}
-	var errs error
+
 	for _, ns := range nsList.Items {
-		if err := s.ScanNamespace(ns.Name); err != nil {
-			log.Error().Err(err).Str("ns", ns.Name).Msg("error scanning namespace")
-			errs = errors.New(errs.Error() + err.Error())
+		if e := s.ScanNamespace(ns.Name); e != nil {
+			log.Error().Err(e).Str("ns", ns.Name).Msg("error scanning namespace")
+			err = errors.Join(err, e)
 		}
 	}
 	log.Info().Msg("all-namespaces scan finished")
-	return errs
+	return err
 }
 
 // ScanClusterWideResources scans all cluster wide resources.
@@ -229,7 +213,7 @@ func (s *Scanner) ScanClusterWideResources() error {
 	clusterReport.Summary.Skip = policies.SkippedNum
 
 	// old policy report to be used as cache
-	previousClusterReport, err := s.reportStore.GetClusterPolicyReport(constants.DefaultClusterwideReportName)
+	previousClusterReport, err := s.policyReportStore.GetClusterPolicyReport(constants.DefaultClusterwideReportName)
 	if err != nil {
 		log.Info().Err(err).Msg("no-prexisting ClusterPolicyReport, will create one at the end of the scan")
 	}
@@ -256,7 +240,7 @@ func (s *Scanner) ScanClusterWideResources() error {
 			}
 		}
 	}
-	if err := s.reportStore.SaveClusterPolicyReport(&clusterReport); err != nil {
+	if err := s.policyReportStore.SaveClusterPolicyReport(&clusterReport); err != nil {
 		log.Error().Err(err).Msg("error adding PolicyReport to store")
 	}
 
@@ -354,7 +338,7 @@ func auditResource(policies []*policies.Policy, resource unstructured.Unstructur
 	}
 }
 
-func sendAdmissionReviewToPolicyServer(url *url.URL, admissionRequest *admv1.AdmissionReview, httpClient *http.Client) (*admv1.AdmissionReview, error) {
+func sendAdmissionReviewToPolicyServer(url *url.URL, admissionRequest *admissionv1.AdmissionReview, httpClient *http.Client) (*admissionv1.AdmissionReview, error) {
 	payload, err := json.Marshal(admissionRequest)
 	if err != nil {
 		return nil, err
@@ -376,7 +360,7 @@ func sendAdmissionReviewToPolicyServer(url *url.URL, admissionRequest *admv1.Adm
 		return nil, fmt.Errorf("unexpected status code: %d body: %s", res.StatusCode, body)
 	}
 
-	admissionReview := admv1.AdmissionReview{}
+	admissionReview := admissionv1.AdmissionReview{}
 	err = json.Unmarshal(body, &admissionReview)
 	if err != nil {
 		return nil, fmt.Errorf("cannot deserialize the audit review response: %w", err)

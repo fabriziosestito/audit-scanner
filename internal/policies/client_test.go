@@ -10,25 +10,25 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func TestGetPoliciesForANamespace(t *testing.T) {
-	namespace := v1.Namespace{
+	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test",
 		},
 	}
 
-	policyServer := policiesv1.PolicyServer{
+	policyServer := &policiesv1.PolicyServer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 		},
 	}
 
-	policyServerService := v1.Service{
+	policyServerService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				"app": "kubewarden-policy-server-default",
@@ -36,8 +36,8 @@ func TestGetPoliciesForANamespace(t *testing.T) {
 			Name:      "policy-server-default",
 			Namespace: "kubewarden",
 		},
-		Spec: v1.ServiceSpec{
-			Ports: []v1.ServicePort{
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
 				{
 					Name: "http",
 					Port: 443,
@@ -202,9 +202,9 @@ func TestGetPoliciesForANamespace(t *testing.T) {
 		Build()
 
 	client := testutils.NewFakeClient(
-		&namespace,
-		&policyServer,
-		&policyServerService,
+		namespace,
+		policyServer,
+		policyServerService,
 		clusterAdmissionPolicy1,
 		clusterAdmissionPolicy2,
 		clusterAdmissionPolicy3,
@@ -229,7 +229,7 @@ func TestGetPoliciesForANamespace(t *testing.T) {
 				Version:  "v1",
 				Resource: "pods",
 			}: {
-				"<none>": {
+				"": {
 					{
 						Policy:       clusterAdmissionPolicy1,
 						PolicyServer: &url.URL{Scheme: "https", Host: "policy-server-default.kubewarden.svc:443", Path: "/audit/clusterwide-policy1"},
@@ -255,7 +255,7 @@ func TestGetPoliciesForANamespace(t *testing.T) {
 				Version:  "v1",
 				Resource: "deployments",
 			}: {
-				"<none>": {
+				"": {
 					{
 						Policy:       clusterAdmissionPolicy1,
 						PolicyServer: &url.URL{Scheme: "https", Host: "policy-server-default.kubewarden.svc:443", Path: "/audit/clusterwide-policy1"},
@@ -284,20 +284,20 @@ func TestGetPoliciesForANamespace(t *testing.T) {
 	assert.Equal(t, expectedPolicies, policies)
 }
 
-func TestGetClusterAdmissionPolicies(t *testing.T) {
-	namespace := v1.Namespace{
+func TestGetClusterWidePolicies(t *testing.T) {
+	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test",
 		},
 	}
 
-	policyServer := policiesv1.PolicyServer{
+	policyServer := &policiesv1.PolicyServer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 		},
 	}
 
-	policyServerService := v1.Service{
+	policyServerService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				"app": "kubewarden-policy-server-default",
@@ -305,8 +305,8 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 			Name:      "policy-server-default",
 			Namespace: "kubewarden",
 		},
-		Spec: v1.ServiceSpec{
-			Ports: []v1.ServicePort{
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
 				{
 					Name: "http",
 					Port: 443,
@@ -315,17 +315,15 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 		},
 	}
 
-	rule := admissionregistrationv1.Rule{
-		APIGroups:   []string{""},
-		APIVersions: []string{"v1"},
-		Resources:   []string{"namespaces"},
-	}
-
 	// a ClusterAdmissionPolicy
 	clusterAdmissionPolicy1 := testutils.
 		NewClusterAdmissionPolicyFactory().
 		Name("policy1").
-		Rule(rule).
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{""},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"namespaces"},
+		}).
 		Status(policiesv1.PolicyStatusActive).
 		Build()
 
@@ -334,7 +332,11 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 		NewClusterAdmissionPolicyFactory().
 		Name("policy2").
 		NamespaceSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"env": "prod"}}).
-		Rule(rule).
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{""},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"namespaces"},
+		}).
 		Status(policiesv1.PolicyStatusActive).
 		Build()
 
@@ -343,7 +345,11 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 		NewClusterAdmissionPolicyFactory().
 		Name("policy3").
 		ObjectSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"env": "test"}}).
-		Rule(rule).
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{""},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"namespaces"},
+		}).
 		Status(policiesv1.PolicyStatusActive).
 		Build()
 
@@ -351,7 +357,11 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 	clusterAdmissionPolicy4 := testutils.
 		NewClusterAdmissionPolicyFactory().
 		Name("policy4").
-		Rule(rule).
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{""},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"namespaces"},
+		}).
 		Status(policiesv1.PolicyStatusPending).
 		Build()
 
@@ -376,9 +386,9 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 		Build()
 
 	client := testutils.NewFakeClient(
-		&namespace,
-		&policyServer,
-		&policyServerService,
+		namespace,
+		policyServer,
+		policyServerService,
 		clusterAdmissionPolicy1,
 		clusterAdmissionPolicy2,
 		clusterAdmissionPolicy3,
@@ -400,7 +410,7 @@ func TestGetClusterAdmissionPolicies(t *testing.T) {
 				Version:  "v1",
 				Resource: "namespaces",
 			}: {
-				"<none>": {
+				"": {
 					{
 						Policy:       clusterAdmissionPolicy1,
 						PolicyServer: &url.URL{Scheme: "https", Host: "policy-server-default.kubewarden.svc:443", Path: "/audit/clusterwide-policy1"},

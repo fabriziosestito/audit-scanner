@@ -1,223 +1,156 @@
 package scanner
 
-// import (
-// 	"context"
-// 	"encoding/json"
-// 	"fmt"
-// 	"io"
-// 	"net/http"
-// 	"net/http/httptest"
-// 	"net/url"
-// 	"testing"
+import (
+	"testing"
 
-// 	"github.com/kubewarden/audit-scanner/internal/constants"
-// 	"github.com/kubewarden/audit-scanner/internal/report"
-// 	"github.com/kubewarden/audit-scanner/internal/resources"
-// 	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
-// 	admv1 "k8s.io/api/admission/v1"
-// 	v1 "k8s.io/api/core/v1"
-// 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-// 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-// 	"k8s.io/apimachinery/pkg/runtime/schema"
-// )
+	"github.com/kubewarden/audit-scanner/internal/k8s"
+	"github.com/kubewarden/audit-scanner/internal/policies"
+	"github.com/kubewarden/audit-scanner/internal/testutils"
+	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
+	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	dynamicFake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/kubernetes/scheme"
+)
 
-// var defaultHTTPTestingServerFunc = func(response http.ResponseWriter, req *http.Request) {
-// 	_, err := io.Copy(response, req.Body)
-// 	if err != nil {
-// 		fmt.Fprintf(response, "Cannot write the response")
-// 	}
-// }
+func TestScanAllNamespaces(t *testing.T) {
+	policyServer := &policiesv1.PolicyServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default",
+		},
+	}
 
-// var defaultHTTPTestingServerHandler = http.HandlerFunc(defaultHTTPTestingServerFunc)
+	policyServerService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"app": "kubewarden-policy-server-default",
+			},
+			Name:      "policy-server-default",
+			Namespace: "kubewarden",
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 443,
+				},
+			},
+		},
+	}
 
-// type ResourcesFetcherMock struct {
-// 	auditURL string
-// }
+	namespace1 := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "namespace1",
+		},
+	}
 
-// func (r ResourcesFetcherMock) GetResourcesForPolicies(_ context.Context, _ []policiesv1.Policy, _ string) ([]resources.AuditableResources, error) {
-// 	return []resources.AuditableResources{}, nil
-// }
+	namespace2 := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "namespace2",
+		},
+	}
 
-// func (r ResourcesFetcherMock) GetPolicyServerURLRunningPolicy(_ context.Context, _ policiesv1.Policy) (*url.URL, error) {
-// 	return url.Parse(r.auditURL)
-// }
+	pod1 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod1",
+			Namespace: "namespace1",
+		},
+	}
 
-// func (r ResourcesFetcherMock) GetClusterWideResourcesForPolicies(_ context.Context, _ []policiesv1.Policy) ([]resources.AuditableResources, error) {
-// 	return []resources.AuditableResources{}, nil
-// }
+	pod2 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod2",
+			Namespace: "namespace2",
+		},
+	}
 
-// func TestSendRequestToPolicyServer(t *testing.T) {
-// 	server := httptest.NewServer(defaultHTTPTestingServerHandler)
-// 	defer func() { server.Close() }()
+	deployment1 := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "deployment1",
+			Namespace: "namespace1",
+		},
+	}
 
-// 	admRequest := admv1.AdmissionRequest{
-// 		UID:  "uid",
-// 		Name: "name",
-// 		Kind: metav1.GroupVersionKind{
-// 			Group:   "",
-// 			Version: "v1",
-// 			Kind:    "pod",
-// 		},
-// 		Resource: metav1.GroupVersionResource{
-// 			Group:    "",
-// 			Version:  "v1",
-// 			Resource: "pod",
-// 		},
-// 		Operation: admv1.Create,
-// 		Namespace: "namespace",
-// 	}
-// 	admReview := admv1.AdmissionReview{
-// 		Request:  &admRequest,
-// 		Response: nil,
-// 	}
-// 	url, err := url.Parse(server.URL)
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
-// 	response, err := sendAdmissionReviewToPolicyServer(url, &admReview, server.Client())
-// 	if err != nil && response == nil {
-// 		t.Fatal(err)
-// 	}
-// 	admissionRequest := response.Request
+	deployment2 := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "deployment2",
+			Namespace: "namespace2",
+		},
+	}
 
-// 	if admissionRequest.Kind.Group != "" {
-// 		t.Errorf("Group diverge")
-// 	}
-// 	if admissionRequest.Kind.Kind != "pod" {
-// 		t.Errorf("Kind diverge")
-// 	}
-// 	if admissionRequest.Kind.Version != "v1" {
-// 		t.Errorf("Version diverge")
-// 	}
-// }
+	// an AdmissionPolicy targeting pods in namespace1
+	admissionPolicy1 := testutils.
+		NewAdmissionPolicyFactory().
+		Name("policy1").
+		Namespace("namespace1").
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{""},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"pods"},
+		}).
+		Status(policiesv1.PolicyStatusActive).
+		Build()
 
-// func TestEvaluationClusterReportCache(t *testing.T) {
-// 	serverCalled := false
-// 	admReview := admv1.AdmissionReview{
-// 		Request: &admv1.AdmissionRequest{},
-// 		Response: &admv1.AdmissionResponse{
-// 			Allowed: true,
-// 			UID:     "asdf-rwegc-qwasd-hwertreg",
-// 		},
-// 	}
-// 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, req *http.Request) {
-// 		serverCalled = true
-// 		payload, _ := json.Marshal(admReview)
-// 		_, err := response.Write(payload)
-// 		if err != nil {
-// 			panic("Unexpected error on testing HTTP server!")
-// 		}
-// 	}))
-// 	defer func() { server.Close() }()
+	// an AdmissionPolicy targeting pods in namespace2
+	admissionPolicy2 := testutils.
+		NewAdmissionPolicyFactory().
+		Name("policy2").
+		Namespace("namespace2").
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{""},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"pods"},
+		}).
+		Status(policiesv1.PolicyStatusActive).
+		Build()
 
-// 	policy := policiesv1.ClusterAdmissionPolicy{
-// 		ObjectMeta: metav1.ObjectMeta{
-// 			Name: "cluster-admission-policy",
-// 		},
-// 	}
-// 	policy.SetGroupVersionKind(schema.GroupVersionKind{
-// 		Group:   constants.KubewardenPoliciesGroup,
-// 		Version: constants.KubewardenPoliciesVersion,
-// 		Kind:    constants.KubewardenKindClusterAdmissionPolicy,
-// 	})
-// 	policy.SetResourceVersion("1")
-// 	resource := unstructured.Unstructured{
-// 		Object: map[string]interface{}{
-// 			"apiVersion": "v1",
-// 			"kind":       "Namespace",
-// 			"metadata": map[string]interface{}{
-// 				"name":            "testingns",
-// 				"resourceVersion": "2",
-// 			},
-// 			"spec":   map[string]interface{}{},
-// 			"status": map[string]interface{}{},
-// 		},
-// 	}
+	// a ClusterAdmissionPolicy targeting pods and deployments in all namespaces
+	clusterAdmissionPolicy := testutils.
+		NewClusterAdmissionPolicyFactory().
+		Name("clusterPolicy").
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{""},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"pods"},
+		}).
+		Rule(admissionregistrationv1.Rule{
+			APIGroups:   []string{"apps"},
+			APIVersions: []string{"v1"},
+			Resources:   []string{"deployments"},
+		}).
+		Status(policiesv1.PolicyStatusActive).
+		Build()
 
-// 	auditableResource := resources.AuditableResources{
-// 		Policies: []policiesv1.Policy{&policy},
-// 		// It can be any kubernetes resource
-// 		Resources: []unstructured.Unstructured{resource},
-// 	}
+	dynamicClient := dynamicFake.NewSimpleDynamicClient(scheme.Scheme)
+	clientset := fake.NewSimpleClientset(
+		namespace1,
+		namespace2,
+		deployment1,
+		deployment2,
+		pod1,
+		pod2,
+	)
+	client := testutils.NewFakeClient(
+		policyServer,
+		policyServerService,
+		admissionPolicy1,
+		admissionPolicy2,
+		clusterAdmissionPolicy,
+	)
 
-// 	resourcesFetcher := ResourcesFetcherMock{
-// 		auditURL: server.URL,
-// 	}
-// 	clusterReport := report.NewClusterPolicyReport("")
-// 	previousClusterReport := report.NewClusterPolicyReport("")
-// 	previousClusterReport.AddResult(previousClusterReport.CreateResult(&policy, resource, &admReview, nil))
+	k8sClient, err := k8s.NewClient(dynamicClient, clientset, "kubewarden", nil)
+	require.NoError(t, err)
 
-// 	auditClusterResource(&auditableResource, resourcesFetcher, server.Client(), &clusterReport, &previousClusterReport)
+	policiesClient, err := policies.NewClient(client, "kubewarden", "")
+	require.NoError(t, err)
 
-// 	if serverCalled {
-// 		t.Errorf("Policy server should not be contacted")
-// 	}
-// }
+	scanner, err := NewScanner(policiesClient, k8sClient, nil, false, true, "")
+	require.NoError(t, err)
 
-// func TestEvaluationNamespaceReportCache(t *testing.T) {
-// 	serverCalled := false
-// 	admReview := admv1.AdmissionReview{
-// 		Request: &admv1.AdmissionRequest{},
-// 		Response: &admv1.AdmissionResponse{
-// 			Allowed: true,
-// 			UID:     "asdf-rwegc-qwasd-hwertreg",
-// 		},
-// 	}
-// 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, req *http.Request) {
-// 		serverCalled = true
-// 		payload, _ := json.Marshal(admReview)
-// 		_, err := response.Write(payload)
-// 		if err != nil {
-// 			panic("Unexpected error on testing HTTP server!")
-// 		}
-// 	}))
-// 	defer func() { server.Close() }()
-
-// 	policy := policiesv1.AdmissionPolicy{
-// 		ObjectMeta: metav1.ObjectMeta{
-// 			Name: "admission-policy",
-// 		},
-// 	}
-// 	policy.SetGroupVersionKind(schema.GroupVersionKind{
-// 		Group:   constants.KubewardenPoliciesGroup,
-// 		Version: constants.KubewardenPoliciesVersion,
-// 		Kind:    constants.KubewardenKindAdmissionPolicy,
-// 	})
-// 	policy.SetResourceVersion("1")
-// 	resource := unstructured.Unstructured{
-// 		Object: map[string]interface{}{
-// 			"apiVersion": "v1",
-// 			"kind":       "Pod",
-// 			"metadata": map[string]interface{}{
-// 				"name":            "testingpod",
-// 				"resourceVersion": "2",
-// 			},
-// 			"spec":   map[string]interface{}{},
-// 			"status": map[string]interface{}{},
-// 		},
-// 	}
-
-// 	auditableResource := resources.AuditableResources{
-// 		Policies: []policiesv1.Policy{&policy},
-// 		// It can be any kubernetes resource
-// 		Resources: []unstructured.Unstructured{resource},
-// 	}
-
-// 	resourcesFetcher := ResourcesFetcherMock{
-// 		auditURL: server.URL,
-// 	}
-// 	namespace := &v1.Namespace{
-// 		ObjectMeta: metav1.ObjectMeta{
-// 			Name: "mynamespace",
-// 		},
-// 	}
-// 	previousReport := report.NewPolicyReport(namespace)
-// 	previousReport.AddResult(previousReport.CreateResult(&policy, resource, &admReview, nil))
-// 	report := report.NewPolicyReport(namespace)
-
-// 	auditResource(&auditableResource, resourcesFetcher, server.Client(), &report, &previousReport)
-
-// 	if serverCalled {
-// 		t.Errorf("Policy server should not be contacted")
-// 	}
-// }
+	err = scanner.ScanAllNamespaces()
+	require.NoError(t, err)
+}

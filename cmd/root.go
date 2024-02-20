@@ -19,16 +19,6 @@ import (
 
 const defaultKubewardenNamespace = "kubewarden"
 
-// A Scanner verifies that existing resources don't violate any of the policies
-type Scanner interface {
-	// ScanNamespace scans a given namespace
-	ScanNamespace(namespace string) error
-	// ScanAllNamespaces scan all namespaces
-	ScanAllNamespaces() error
-	// Scan only cluster wide resources
-	ScanClusterWideResources() error
-}
-
 // log level
 var level logconfig.Level
 
@@ -85,7 +75,6 @@ There will be a ClusterPolicyReport with results for cluster-wide resources.`,
 		if err != nil {
 			return err
 		}
-
 		policiesClient, err := policies.NewClient(client, kubewardenNamespace, policyServerURL)
 		if err != nil {
 			return err
@@ -94,7 +83,13 @@ There will be a ClusterPolicyReport with results for cluster-wide resources.`,
 		if err != nil {
 			return err
 		}
-		scanner, err := scanner.NewScanner(storeType, policiesClient, k8sClient, outputScan, insecureSSL, caCertFile)
+
+		policyReportStore, err := report.NewPolicyReportStoreFromType(storeType)
+		if err != nil {
+			return err
+		}
+
+		scanner, err := scanner.NewScanner(policiesClient, k8sClient, policyReportStore, outputScan, insecureSSL, caCertFile)
 		if err != nil {
 			return err
 		}
@@ -115,7 +110,7 @@ func Execute() {
 	}
 }
 
-func startScanner(namespace string, clusterWide bool, scanner Scanner) error {
+func startScanner(namespace string, clusterWide bool, scanner *scanner.Scanner) error {
 	if clusterWide && namespace != "" {
 		log.Fatal().Msg("Cannot scan cluster wide and only a namespace at the same time")
 	}

@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,13 +20,13 @@ import (
 func TestGetResources(t *testing.T) {
 	var pods []runtime.Object
 	for i := 0; i < 15; i++ {
-		pods = append(pods, &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%d", i), Namespace: "default"}})
+		pods = append(pods, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%d", i), Namespace: "default"}})
 	}
 
 	dynamicClient := dynamicFake.NewSimpleDynamicClient(scheme.Scheme, pods...)
-	fakeClient := fake.NewSimpleClientset()
+	clientset := fake.NewSimpleClientset()
 
-	k8sClient, err := NewClient(dynamicClient, fakeClient, "kubewarden", nil)
+	k8sClient, err := NewClient(dynamicClient, clientset, "kubewarden", nil)
 	require.NoError(t, err)
 
 	pager, err := k8sClient.GetResources(schema.GroupVersionResource{

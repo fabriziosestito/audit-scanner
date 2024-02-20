@@ -7,7 +7,7 @@ import (
 
 	policiesv1 "github.com/kubewarden/kubewarden-controller/pkg/apis/policies/v1"
 	"github.com/rs/zerolog/log"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -126,7 +126,7 @@ func (f *Client) GetClusterWidePolicies(ctx context.Context) (*Policies, error) 
 // initializes map with an entry for all namespaces with an empty policies array as value
 func (f *Client) initNamespacePoliciesMap(ctx context.Context) (map[string][]policiesv1.Policy, error) {
 	namespacePolicies := make(map[string][]policiesv1.Policy)
-	namespaceList := &v1.NamespaceList{}
+	namespaceList := &corev1.NamespaceList{}
 	err := f.client.List(ctx, namespaceList, &client.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("can't list namespaces: %w", err)
@@ -166,8 +166,8 @@ func (f *Client) findNamespacesForAllClusterAdmissionPolicies(ctx context.Contex
 }
 
 // finds all namespaces where this ClusterAdmissionPolicy will evaluate resources. It uses the namespaceSelector field to filter the namespaces.
-func (f *Client) findNamespacesForClusterAdmissionPolicy(ctx context.Context, policy policiesv1.ClusterAdmissionPolicy) ([]v1.Namespace, error) {
-	namespaceList := &v1.NamespaceList{}
+func (f *Client) findNamespacesForClusterAdmissionPolicy(ctx context.Context, policy policiesv1.ClusterAdmissionPolicy) ([]corev1.Namespace, error) {
+	namespaceList := &corev1.NamespaceList{}
 	labelSelector, err := metav1.LabelSelectorAsSelector(policy.GetUpdatedNamespaceSelector(f.kubewardenNamespace))
 	if err != nil {
 		return nil, err
@@ -224,8 +224,11 @@ func (f *Client) groupPoliciesByGVRAndLabelSelector(ctx context.Context, policie
 							// continue if resource is namespaced
 							continue
 						}
-
-						labelSelector := metav1.FormatLabelSelector(policy.GetObjectSelector())
+						selector, err := metav1.LabelSelectorAsSelector(policy.GetObjectSelector())
+						if err != nil {
+							return nil, err
+						}
+						labelSelector := selector.String()
 
 						policy := Policy{
 							Policy:       policy,
@@ -312,8 +315,8 @@ func (f *Client) getPolicyServerByName(ctx context.Context, policyServerName str
 	return &policyServer, nil
 }
 
-func (f *Client) getServiceByAppLabel(ctx context.Context, appLabel string, namespace string) (*v1.Service, error) {
-	serviceList := v1.ServiceList{}
+func (f *Client) getServiceByAppLabel(ctx context.Context, appLabel string, namespace string) (*corev1.Service, error) {
+	serviceList := corev1.ServiceList{}
 	err := f.client.List(ctx, &serviceList, &client.ListOptions{Namespace: namespace}, &client.MatchingLabels{"app": appLabel})
 	if err != nil {
 		return nil, err
