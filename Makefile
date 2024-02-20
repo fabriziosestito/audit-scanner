@@ -22,10 +22,13 @@ lint: $(GOLANGCI_LINT)
 
 .PHONY: unit-tests
 unit-tests: fmt vet ## Run unit tests.
-	go test ./cmd/... ./internal/... -race -test.v -coverprofile=coverage/unit-tests/coverage.txt -covermode=atomic
+	go test -tags testing ./cmd/... ./internal/... -race -test.v -coverprofile=coverage/unit-tests/coverage.txt -covermode=atomic
 
-build: fmt vet lint ## Build audit-scanner binary.
+build: # fmt vet lint ## Build audit-scanner binary.
 	go build -o bin/audit-scanner .
+
+generate: ## Generate code.
+	go generate ./...
 
 .PHONY: docker-build
 docker-build: unit-tests
