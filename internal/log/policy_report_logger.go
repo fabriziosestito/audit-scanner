@@ -1,13 +1,13 @@
 package log
 
 import (
-	"github.com/kubewarden/audit-scanner/internal/report"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	wgpolicy "sigs.k8s.io/wg-policy-prototypes/policy-report/pkg/api/wgpolicyk8s.io/v1alpha2"
 )
 
 // ClusterPolicyReport will create a log line per each cluster-wide scanned resource
-func ClusterPolicyReport(report *report.ClusterPolicyReport) {
+func ClusterPolicyReport(report *wgpolicy.ClusterPolicyReport) {
 	log.Info().
 		Dict("dict", zerolog.Dict().
 			Int("pass", report.Summary.Pass).
@@ -35,7 +35,7 @@ func ClusterPolicyReport(report *report.ClusterPolicyReport) {
 }
 
 // PolicyReport will create a log line per each namespace scanned resource.
-func PolicyReport(report *report.PolicyReport) {
+func PolicyReport(report *wgpolicy.PolicyReport) {
 	log.Info().
 		Dict("dict", zerolog.Dict().
 			Str("name", report.GetName()).
